@@ -1,9 +1,23 @@
-# Only the web app is tracked; clips, exports, prototypes and tool state stay local.
+# Tracked: the web app, the v1 prototype and the docs. Everything else in the
+# folder (clips, exports, virtualenvs, tool state) stays local.
 /*
 !/.gitignore
-!/site/
+!/README.md
+!/docs/
+!/web/
+!/v1/
 
-site/.hallmark/
-site/.vercel/
-site/.env*
+# web: deploy link, its token and design-tool notes
+web/.vercel/
+web/.env*
+web/.hallmark/
+
+# v1: input clips, traced frames and exports are generated, not source
+v1/*.mp4
+v1/*.mov
+v1/*.webm
+v1/*.js
+v1/export_frames/
+v1/.venv/
+__pycache__/
 .DS_Store

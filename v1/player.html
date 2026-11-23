@@ -1,0 +1,146 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Desmos Video Player</title>
+<!-- Public demo key from the Desmos API docs; get your own at desmos.com/api for anything public. -->
+<script src="https://www.desmos.com/api/v1.11/calculator.js?apiKey=dcb31709b452b1cf9dc26972add0fda6"></script>
+<script>
+  // ?clip=name loads name.js (written by convert.py); defaults to source.js.
+  const CLIP = (new URLSearchParams(location.search).get('clip') || 'source').replace(/[^\w-]/g, '');
+  document.title = `Desmos · ${CLIP}`;
+  document.write(`<script src="${CLIP}.js"><\/script>`);
+</script>
+<style>
+  :root { --bg: #111; --fg: #eee; --muted: #888; }
+  html, body { margin: 0; height: 100%; background: var(--bg); color: var(--fg); font: 14px system-ui, sans-serif; }
+  body { display: flex; flex-direction: column; }
+  #calc { flex: 1; min-height: 0; }
+  #bar { display: flex; gap: 12px; align-items: center; padding: 10px 16px; flex-wrap: wrap; }
+  #bar input[type=range] { flex: 1; min-width: 160px; }
+  #bar label { color: var(--muted); display: flex; gap: 6px; align-items: center; }
+  button { background: #333; color: var(--fg); border: 1px solid #555; border-radius: 6px; padding: 6px 12px; cursor: pointer; }
+  #stats { color: var(--muted); font-variant-numeric: tabular-nums; min-width: 220px; }
+</style>
+</head>
+<body>
+<div id="calc"></div>
+<div id="bar">
+  <button id="play">Play</button>
+  <input id="seek" type="range" min="0" value="0">
+  <label>fps <input id="fps" type="number" min="1" max="60" step="1" style="width:4em"></label>
+  <label><input id="expr" type="checkbox"> show expressions</label>
+  <span id="stats"></span>
+</div>
+<script>
+const D = window.DESMOS_FRAMES;
+if (!D) {
+  document.body.innerHTML = `<p style="padding:16px">No ${CLIP}.js found. Run convert.py first.</p>`;
+  throw new Error('frames.js missing');
+}
+
+const calc = Desmos.GraphingCalculator(document.getElementById('calc'), {
+  expressions: false, settingsMenu: false, zoomButtons: false, keypad: false,
+  showGrid: false, showXAxis: false, showYAxis: false, lockViewport: true,
+});
+const pad = 10;
+calc.setMathBounds({ left: -pad, right: D.width + pad, bottom: -pad, top: D.height + pad });
+
+// The whole frame is ONE point list; an undefined point (0/0,0/0) breaks the line
+// between curves. One expression per frame is far faster than one per curve.
+const BREAK = '(0/0,0/0)';
+function frameLatex(polys) {
+  return '\\left[' + polys.map(p => p.map(q => `(${q[0]},${q[1]})`).join(',')).join(`,${BREAK},`) + '\\right]';
+}
+
+let frame = 0, playing = false, raf = 0, t0 = 0, f0 = 0, drawn = 0, statT = 0, realFps = 0;
+
+// With a palette: one expression per palette colour, each holding that colour's curves.
+const COLOR = !!D.palette && !new URLSearchParams(location.search).has('mono');
+// Screenshots always come out on white. For a dark export we draw the inverted palette and
+// export.py negates the frames: 255 - (a*(255-c) + (1-a)*255) = a*c, i.e. exact colour-on-black.
+const invertHex = h => '#' + (0xffffff ^ parseInt(h.slice(1), 16)).toString(16).padStart(6, '0');
+const PALETTE = COLOR && new URLSearchParams(location.search).has('export') ? D.palette.map(invertHex) : D.palette;
+function draw(i) {
+  frame = i;
+  const polys = D.frames[i];
+  if (COLOR) {
+    const groups = D.palette.map(() => []);
+    polys.forEach((p, k) => groups[D.colors[i][k]].push(p));
+    calc.setExpressions(groups.map((g, c) => ({
+      id: 'p' + c, latex: g.length ? frameLatex(g) : '', color: PALETTE[c],
+      points: false, lines: true, lineWidth: 1.5,
+    })));
+  } else {
+    calc.setExpression({
+      id: 'video', latex: frameLatex(polys), color: '#000000',
+      points: false, lines: true, lineWidth: 1.5,
+    });
+  }
+  seek.value = i;
+  drawn++;
+  const npts = polys.reduce((s, p) => s + p.length, 0);
+  stats.textContent = `frame ${i + 1}/${D.frames.length} · ${polys.length} curves · ${npts} pts` +
+    (playing ? ` · ${realFps.toFixed(0)} fps` : '');
+}
+
+// Time-based: if rendering falls behind, frames are skipped so playback stays real-time.
+function loop(now) {
+  const target = (f0 + Math.floor((now - t0) / 1000 * +fps.value)) % D.frames.length;
+  if (target !== frame) draw(target);
+  if (now - statT > 1000) { realFps = drawn * 1000 / (now - statT); drawn = 0; statT = now; }
+  raf = requestAnimationFrame(loop);
+}
+function setPlaying(on) {
+  playing = on;
+  play.textContent = on ? 'Pause' : 'Play';
+  cancelAnimationFrame(raf);
+  if (on) { t0 = statT = performance.now(); f0 = frame; drawn = 0; raf = requestAnimationFrame(loop); }
+}
+
+const play = document.getElementById('play'), seek = document.getElementById('seek');
+const fps = document.getElementById('fps'), stats = document.getElementById('stats');
+seek.max = D.frames.length - 1;
+fps.value = D.fps;
+fps.onchange = () => { if (playing) setPlaying(true); };
+play.onclick = () => setPlaying(!playing);
+seek.oninput = () => { setPlaying(false); draw(+seek.value); };
+document.getElementById('expr').onchange = e => calc.updateSettings({ expressions: e.target.checked });
+document.addEventListener('keydown', e => {
+  if (e.target.tagName === 'INPUT' && e.target.type !== 'range') return;
+  if (e.key === ' ') { e.preventDefault(); setPlaying(!playing); }
+  if (e.key === 'ArrowRight') { setPlaying(false); draw(Math.min(frame + 1, D.frames.length - 1)); }
+  if (e.key === 'ArrowLeft') { setPlaying(false); draw(Math.max(frame - 1, 0)); }
+});
+const params = new URLSearchParams(location.search);
+// Coloured lines sit on black; invertedColors would also invert the palette, so set the
+// background directly instead. Mono can still use ?invert for white-on-black.
+if (COLOR) calc.updateSettings({ backgroundColor: '#000000', textColor: '#ffffff' });
+else if (params.has('invert')) calc.updateSettings({ invertedColors: true });
+
+// Export mode (driven by export.py): render every frame in Desmos, screenshot it,
+// and POST the PNG back to the local server, which stitches them with ffmpeg.
+async function exportAll() {
+  const W = +params.get('w') || 1280, H = +params.get('h') || 720;
+  const ratio = W / D.width;  // scale line widths along with resolution
+  const shot = () => new Promise(res => calc.asyncScreenshot({
+    width: D.width, height: Math.round(D.width * H / W), targetPixelRatio: ratio,
+    mathBounds: { left: 0, right: D.width, bottom: 0, top: D.height }, showLabels: false,
+  }, res));
+  play.disabled = seek.disabled = true;
+  for (let i = 0; i < D.frames.length; i++) {
+    draw(i);
+    const png = await (await fetch(await shot())).blob();  // asyncScreenshot waits for the render
+    await fetch(`/frame?i=${i}`, { method: 'POST', body: png });
+    stats.textContent = `exporting ${i + 1}/${D.frames.length}`;
+  }
+  await fetch('/done', { method: 'POST' });
+  stats.textContent = 'export done — encoding in terminal, you can close this tab';
+}
+
+draw(0);
+if (params.has('export')) exportAll();
+</script>
+</body>
+</html>
