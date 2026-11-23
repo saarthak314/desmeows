@@ -68,11 +68,10 @@ browser to encode H.264; where it can't, *save as page* still works.
 
 ## Deploy
 
-The site is static and is hosted on Vercel, deployed from `web/`:
-
-```bash
-cd web && npx vercel deploy --prod
-```
+The site is static and hosted on Vercel, connected to this repository with `web/` as
+the project's root directory. Every push to `main` deploys to production at
+[desmeows.vercel.app](https://desmeows.vercel.app); other branches and pull requests get
+preview deployments. There is no build step: Vercel serves `web/` as it is.
 
 ### Desmos API key
 
