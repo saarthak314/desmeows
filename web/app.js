@@ -3,7 +3,7 @@ import {
   CanvasSource, EncodedPacketSink, EncodedAudioPacketSource, canEncodeVideo,
 } from 'https://cdn.jsdelivr.net/npm/mediabunny@1.65.2/dist/bundles/mediabunny.min.mjs';
 import { SceneCutter, sceneSamples } from './palette.js';
-import { slotState, frameExprs, widthExprs, packLayer, Painter, rasterize } from './render.js';
+import { slotState, frameExprs, widthExprs, packLayer, Painter, rasterize, bounds } from './render.js';
 
 // ---------------------------------------------------------------- settings
 
@@ -445,7 +445,7 @@ function ensureCalc(W, H, style) {
   const key = `${W}x${H}|${style}`;
   if (key !== calcKey) {
     calc.setState(slotState(calc.getState(), W, H));
-    calc.setMathBounds({ left: 0, right: W, bottom: 0, top: H });
+    calc.setMathBounds(bounds(W, H));
     painter.reset();
     calcKey = key;
   }
@@ -454,7 +454,7 @@ function ensureCalc(W, H, style) {
 
 function applyWidths() {
   if (!calc || !clip) return;
-  calc.setMathBounds({ left: 0, right: clip.W, bottom: 0, top: clip.H });
+  calc.setMathBounds(bounds(clip.W, clip.H));
   calc.setExpressions(widthExprs(clip.style, clip.W, $('calc').clientWidth / clip.W));
 }
 
@@ -588,7 +588,7 @@ $('export-mp4').addEventListener('click', () => exportMp4());
 function screenshot(c, W, H, ratio) {
   return new Promise((resolve) => c.asyncScreenshot({
     width: W, height: H, targetPixelRatio: ratio, showLabels: false, format: 'png',
-    mathBounds: { left: 0, right: W, bottom: 0, top: H },
+    mathBounds: bounds(W, H),
   }, resolve));
 }
 
@@ -657,7 +657,7 @@ async function exportMp4() {
     if (!exportCalc) exportCalc = Desmos.GraphingCalculator(el, CALC_OPTIONS);
     exportCalc.setState(slotState(exportCalc.getState(), W, H));
     exportPainter = new Painter(exportCalc);
-    exportCalc.setMathBounds({ left: 0, right: W, bottom: 0, top: H });
+    exportCalc.setMathBounds(bounds(W, H));
     exportCalc.setExpressions(widthExprs(style, W, 1));
   }
 
@@ -824,7 +824,7 @@ const el = document.getElementById('calc');
 const calc = Desmos.GraphingCalculator(el, { expressions: false, settingsMenu: false, zoomButtons: false, lockViewport: true, border: false, showGrid: false, showXAxis: false, showYAxis: false, keypad: false, pointsOfInterest: false, trace: false, backgroundColor: '#0e1016' });
 const painter = new Painter(calc);
 calc.setState(slotState(calc.getState(), D.W, D.H));
-calc.setMathBounds({ left: 0, right: D.W, bottom: 0, top: D.H });
+calc.setMathBounds(bounds(D.W, D.H));
 const widths = () => calc.setExpressions(widthExprs(D.style, D.W, el.clientWidth / D.W));
 new ResizeObserver(widths).observe(el);
 let cur = -1, playing = true, t0 = performance.now(), f0 = 0;

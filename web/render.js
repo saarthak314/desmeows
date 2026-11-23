@@ -10,15 +10,19 @@
 // are created once with setState and only their latex changes per frame.
 
 export const CHUNK = 8000;
+
+// Vertices are stored in half-pixel units (exact for everything the tracer makes), and the
+// graph's axes are set in the same units, so Desmos is given plain integers.
+export const UNITS = 2;
+export const bounds = (W, H) => ({ left: 0, right: W * UNITS, bottom: 0, top: H * UNITS });
 export const FILL_SLOTS = 8;
 export const LINE_SLOTS = 4;
 
-const num = (v) => (Number.isInteger(v) ? String(v) : v.toFixed(1));
 
 export function slotState(state, W, H) {
   const list = [];
   list.push({ type: 'expression', id: 'cbg', latex: 'C_{0}=\\operatorname{rgb}(0,0,0)' });
-  list.push({ type: 'expression', id: 'bg', latex: rect(W, H), colorLatex: 'C_{0}', fillOpacity: '1', lineOpacity: '1', lineWidth: '1' });
+  list.push({ type: 'expression', id: 'bg', latex: rect(W * UNITS, H * UNITS), colorLatex: 'C_{0}', fillOpacity: '1', lineOpacity: '1', lineWidth: '1' });
   for (let k = 0; k < FILL_SLOTS; k++) {
     list.push({ type: 'expression', id: `cf${k}`, latex: `C_{1${k}}=\\operatorname{rgb}(0,0,0)` });
     list.push({ type: 'expression', id: `f${k}`, latex: '', colorLatex: `C_{1${k}}`, fillOpacity: '1', lineOpacity: '1', lineWidth: '1' });
@@ -48,7 +52,7 @@ function layerExprs(layer, prefix, colorBase, slots, out, cap = Infinity) {
     for (let s = from; s < to; s++) {
       const c = layer.counts[s];
       const pts = new Array(c);
-      for (let i = 0; i < c; i++, v++) pts[i] = `(${num(layer.verts[2 * v])},${num(layer.verts[2 * v + 1])})`;
+      for (let i = 0; i < c; i++, v++) pts[i] = `(${layer.verts[2 * v]},${layer.verts[2 * v + 1]})`;
       polys.push(`\\operatorname{polygon}(${pts.join(',')})`);
       R.push(layer.rgb[3 * s]); G.push(layer.rgb[3 * s + 1]); B.push(layer.rgb[3 * s + 2]);
     }
@@ -81,20 +85,16 @@ export function widthExprs(style, W, scale) {
   return out;
 }
 
-// Compact storage for the saved page: coordinates as Int16 at half-pixel precision.
+// The saved page stores layers as they are, base64 encoded.
 export function packLayer(L) {
   if (!L) return null;
-  const v = new Int16Array(L.verts.length);
-  for (let i = 0; i < v.length; i++) v[i] = Math.round(L.verts[i] * 2);
-  return { v: b64(new Uint8Array(v.buffer)), c: b64(new Uint8Array(new Uint32Array(L.counts).buffer)), r: b64(L.rgb) };
+  const bytes = (a) => b64(new Uint8Array(a.buffer, a.byteOffset, a.byteLength));
+  return { v: bytes(L.verts), c: bytes(L.counts), r: b64(L.rgb) };
 }
 
 export function unpackLayer(P) {
   if (!P) return null;
-  const v16 = new Int16Array(unb64(P.v).buffer);
-  const verts = new Float32Array(v16.length);
-  for (let i = 0; i < v16.length; i++) verts[i] = v16[i] / 2;
-  return { verts, counts: new Uint32Array(unb64(P.c).buffer), rgb: unb64(P.r) };
+  return { verts: new Int16Array(unb64(P.v).buffer), counts: new Uint32Array(unb64(P.c).buffer), rgb: unb64(P.r) };
 }
 
 function b64(u8) {
@@ -130,6 +130,7 @@ export class Painter {
 // line widths Desmos is given, without Desmos's parse, evaluate and screenshot round trip.
 // ctx is outW x outH; s = output pixels per trace pixel. Widths mirror widthExprs at scale 1.
 export function rasterize(ctx, frame, style, W, H, s) {
+  const u = s / UNITS, Hu = H * UNITS; // vertex units -> output pixels
   const bg = style === 'paint' && frame.mean ? frame.mean : [0, 0, 0];
   ctx.fillStyle = `rgb(${bg[0]},${bg[1]},${bg[2]})`;
   ctx.fillRect(0, 0, ctx.canvas.width, ctx.canvas.height);
@@ -145,8 +146,8 @@ export function rasterize(ctx, frame, style, W, H, s) {
       const c = L.counts[k];
       const col = `rgb(${L.rgb[3 * k]},${L.rgb[3 * k + 1]},${L.rgb[3 * k + 2]})`;
       ctx.beginPath();
-      ctx.moveTo(L.verts[2 * v] * s, (H - L.verts[2 * v + 1]) * s);
-      for (let i = 1; i < c; i++) ctx.lineTo(L.verts[2 * (v + i)] * s, (H - L.verts[2 * (v + i) + 1]) * s);
+      ctx.moveTo(L.verts[2 * v] * u, (Hu - L.verts[2 * v + 1]) * u);
+      for (let i = 1; i < c; i++) ctx.lineTo(L.verts[2 * (v + i)] * u, (Hu - L.verts[2 * (v + i) + 1]) * u);
       ctx.closePath();
       v += c;
       if (fill) { ctx.fillStyle = col; ctx.fill(); }

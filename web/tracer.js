@@ -7,8 +7,8 @@
 //   lines: per-channel Lab Canny, thinned to 1px, walked into centerlines, simplified,
 //          coloured from the bright side (line art) or the dark side (ink over paint).
 //
-// Output per layer: verts Float32Array (x, y pairs, y up), counts Uint32Array (vertices per
-// shape), rgb Uint8Array (3 per shape). Coordinates are in trace pixels.
+// Output per layer: verts Int16Array (x, y pairs, y up, in half trace pixels), counts
+// Uint32Array (vertices per shape), rgb Uint8Array (3 per shape).
 
 import { kmeans, buildLUT } from './palette.js';
 
@@ -59,11 +59,14 @@ function meanColor(rgba) {
   return [Math.round(r / n), Math.round(g / n), Math.round(b / n)];
 }
 
+// Every coordinate the tracer makes is a multiple of half a pixel (crack midpoints, pixel
+// corners, pixel centres), so storing half-pixel units in 16 bits is exact and half the size
+// of Float32: less memory per clip, smaller transfers, and integer latex for Desmos.
 class Layer {
   constructor() { this.v = []; this.c = []; this.rgb = []; }
-  push(pts, r, g, b) { for (const p of pts) this.v.push(p); this.c.push(pts.length >> 1); this.rgb.push(r, g, b); }
+  push(pts, r, g, b) { for (const p of pts) this.v.push(p * 2); this.c.push(pts.length >> 1); this.rgb.push(r, g, b); }
   done() {
-    return { verts: Float32Array.from(this.v), counts: Uint32Array.from(this.c), rgb: Uint8Array.from(this.rgb) };
+    return { verts: Int16Array.from(this.v), counts: Uint32Array.from(this.c), rgb: Uint8Array.from(this.rgb) };
   }
 }
 
