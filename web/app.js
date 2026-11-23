@@ -39,6 +39,7 @@ const settings = {
   fps: ['source', '24', '12'].includes(params.get('fps')) ? params.get('fps') : 'source',
   ink: params.get('ink') !== 'off',
   size: params.get('size') || '',
+  credit: params.get('credit') !== 'off',
 };
 
 function syncSettingsUI() {
@@ -47,6 +48,8 @@ function syncSettingsUI() {
     if (input) input.checked = true;
   }
   $('ink').checked = settings.ink;
+  $('credit').checked = settings.credit;
+  body.classList.toggle('credited', settings.credit);
   body.dataset.style = settings.style;
   $('fidelity-note').textContent = media ? TIER_NOTE[settings.style][settings.fidelity](traceWidth()) : '';
   const q = new URLSearchParams();
@@ -55,6 +58,7 @@ function syncSettingsUI() {
   if (settings.fps !== 'source') q.set('fps', settings.fps);
   if (!settings.ink) q.set('ink', 'off');
   if (settings.size) q.set('size', settings.size);
+  if (!settings.credit) q.set('credit', 'off');
   history.replaceState(null, '', q.size ? `?${q}` : location.pathname);
   markStale();
 }
@@ -64,6 +68,7 @@ document.addEventListener('change', (e) => {
   if (t.name === 'style' || t.name === 'fidelity' || t.name === 'fps') settings[t.name] = t.value;
   else if (t.id === 'ink') settings.ink = t.checked;
   else if (t.name === 'size') { settings.size = t.value; syncSettingsUI(); return; }
+  else if (t.id === 'credit') { settings.credit = t.checked; syncSettingsUI(); return; }
   else return;
   syncSettingsUI();
 });
@@ -544,6 +549,51 @@ function screenshot(c, W, H, ratio) {
   }, resolve));
 }
 
+// The credit: "desmeows" in the site's serif, bottom right, sized to the video's height so
+// it reads the same at 720p and 4K. Two stamps are drawn once, light ink for dark corners
+// and dark ink for bright ones; each frame picks one from how bright its corner is.
+const CREDIT = { text: 'desmeows', size: 0.034, margin: 0.03, alpha: 0.85 };
+
+async function creditStamp(outW, outH) {
+  const px = Math.max(14, Math.round(outH * CREDIT.size));
+  const font = `${px}px ${getComputedStyle(document.documentElement).getPropertyValue('--font-display').trim()}`;
+  await document.fonts.load(font);
+  const pad = Math.ceil(px * 0.6);
+  const probe = document.createElement('canvas').getContext('2d');
+  probe.font = font;
+  const m = probe.measureText(CREDIT.text);
+  const stamp = (ink, shade) => {
+    const c = document.createElement('canvas');
+    c.width = Math.ceil(m.width) + pad * 2;
+    c.height = Math.ceil(m.actualBoundingBoxAscent + m.actualBoundingBoxDescent) + pad * 2;
+    const g = c.getContext('2d');
+    g.font = font;
+    g.globalAlpha = CREDIT.alpha;
+    g.shadowColor = shade;
+    g.shadowBlur = px * 0.25;
+    g.fillStyle = ink;
+    g.fillText(CREDIT.text, pad, pad + m.actualBoundingBoxAscent);
+    return c;
+  };
+  const light = stamp(colorToken('--color-ink'), colorToken('--color-shade'));
+  const dark = stamp(colorToken('--color-paper'), colorToken('--color-glow'));
+  const margin = Math.round(outH * CREDIT.margin);
+  const x = outW - margin - light.width + pad, y = outH - margin - light.height + pad;
+  let onBright = false;
+  return {
+    // stamp onto a frame already drawn into ctx
+    draw(ctx) {
+      const d = ctx.getImageData(x + pad, y + pad, light.width - 2 * pad, light.height - 2 * pad).data;
+      let sum = 0;
+      for (let i = 0; i < d.length; i += 16) sum += 0.2126 * d[i] + 0.7152 * d[i + 1] + 0.0722 * d[i + 2];
+      const lum = sum / (d.length / 16) / 255;
+      // hysteresis, so a corner hovering near the middle doesn't flicker between the two
+      if (onBright ? lum < 0.5 : lum > 0.62) onBright = !onBright;
+      ctx.drawImage(onBright ? dark : light, x, y);
+    },
+  };
+}
+
 let exportCalc = null;
 async function exportMp4() {
   const sel = document.querySelector('input[name="size"]:checked');
@@ -566,8 +616,9 @@ async function exportMp4() {
 
   const canvas = document.createElement('canvas');
   canvas.width = outW; canvas.height = outH;
-  const ctx = canvas.getContext('2d');
+  const ctx = canvas.getContext('2d', { willReadFrequently: true });
   ctx.imageSmoothingQuality = 'high';
+  const credit = settings.credit ? await creditStamp(outW, outH) : null;
   let output = null;
   try {
     output = new Output({ format: new Mp4OutputFormat({ fastStart: 'in-memory' }), target: new BufferTarget() });
@@ -590,6 +641,7 @@ async function exportMp4() {
       img.src = url;
       await img.decode();
       ctx.drawImage(img, 0, 0, outW, outH);
+      if (credit) credit.draw(ctx);
       await video.add(i / fps, 1 / fps);
       const left = (performance.now() - started) / (i + 1) * (frames.length - i - 1);
       $('export-figure').textContent = `${i + 1} / ${frames.length}`;
@@ -654,11 +706,11 @@ async function savePage() {
     frames: clip.frames.map((f) => ({ f: packLayer(f.fill), l: packLayer(f.line), m: f.mean })),
   };
   const title = `${baseName()} in Desmos`;
-  const html = standalonePage(title, JSON.stringify(data), renderSrc);
+  const html = standalonePage(title, JSON.stringify(data), renderSrc, settings.credit);
   offerDownload(new Blob([html], { type: 'text/html' }), `${baseName()}-desmos.html`);
 }
 
-function standalonePage(title, json, renderSrc) {
+function standalonePage(title, json, renderSrc, credit) {
   const esc = (s) => s.replace(/</g, '\\u003c');
   return `<!doctype html>
 <html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
@@ -669,7 +721,9 @@ function standalonePage(title, json, renderSrc) {
 html, body { margin: 0; height: 100%; background: var(--paper); color: var(--ink); font: 13px/1.5 "IBM Plex Mono", ui-monospace, Menlo, monospace; }
 body { display: grid; grid-template-rows: minmax(0, 1fr) auto; }
 #stage { display: grid; place-items: center; min-height: 0; padding: 16px; }
-#calc { width: min(100%, calc((100dvh - 88px) * ${clip.W / clip.H})); aspect-ratio: ${clip.W / clip.H}; }
+#frame { position: relative; width: min(100%, calc((100dvh - 88px) * ${clip.W / clip.H})); aspect-ratio: ${clip.W / clip.H}; container-type: size; }
+#calc { width: 100%; height: 100%; }
+#credit { position: absolute; right: 3cqh; bottom: 3cqh; margin: 0; font: 3.4cqh/1 "Instrument Serif", Georgia, serif; color: var(--ink); opacity: 0.8; text-shadow: 0 0 0.25em rgb(0 0 0 / 0.55); pointer-events: none; }
 #bar { display: flex; gap: 12px; align-items: center; padding: 12px 16px 16px; }
 #bar input { flex: 1; accent-color: var(--accent); }
 button { background: none; color: var(--ink); border: 1px solid var(--line); padding: 8px 14px; cursor: pointer; font: inherit; }
@@ -677,7 +731,7 @@ button:focus-visible, input:focus-visible { outline: 2px solid var(--accent); ou
 span { color: var(--muted); font-variant-numeric: tabular-nums; }
 </style></head>
 <body>
-<div id="stage"><div id="calc"></div></div>
+<div id="stage"><div id="frame"><div id="calc"></div>${credit ? '<p id="credit">desmeows</p>' : ''}</div></div>
 <div id="bar"><button id="play" type="button">pause</button><input id="seek" type="range" min="0" value="0" aria-label="Frame"><span id="t"></span></div>
 <script>
 ${renderSrc}

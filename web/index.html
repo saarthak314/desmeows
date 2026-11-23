@@ -49,6 +49,7 @@
         <p class="frame-label frame-label--right num" id="frame-note" role="status"></p>
         <canvas class="source" id="source" aria-label="Source video frame"></canvas>
         <div class="calc" id="calc" aria-label="Desmos graph of the current frame"></div>
+        <div class="credit-box" aria-hidden="true"><span class="credit-mark">desmeows</span></div>
       </div>
       <div class="transport" id="transport">
         <button class="icon-btn" id="play" type="button" aria-label="Play" disabled>
@@ -133,6 +134,13 @@
         <legend>size</legend>
         <div class="seg" role="radiogroup" id="size-seg"></div>
       </fieldset>
+      <div class="row">
+        <label class="switch" for="credit">
+          <input type="checkbox" id="credit" role="switch" checked>
+          <span class="switch-track" aria-hidden="true"></span>
+          <span>desmeows in the corner</span>
+        </label>
+      </div>
       <div class="actions">
         <button class="btn btn--primary" id="export-mp4" type="button">export mp4</button>
         <button class="btn" id="save-page" type="button">save as page</button>

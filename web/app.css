@@ -92,6 +92,20 @@ body.comparing .frame-label--left { color: var(--color-warm); }
   max-height: 100%;
 }
 .source { opacity: 0; z-index: var(--z-base); pointer-events: none; }
+
+/* where the export's credit will sit, at the same size relative to the picture */
+.credit-box {
+  position: relative; grid-area: 1 / 1; z-index: var(--z-base); pointer-events: none;
+  width: min(100%, calc(var(--frame-h, 100%) * var(--aspect, 1.7778)));
+  aspect-ratio: var(--aspect, 1.7778); max-height: 100%;
+  container-type: size; display: none;
+}
+body.credited:is([data-state="ready"], [data-state="exporting"]):not(.comparing) .credit-box { display: block; }
+.credit-mark {
+  position: absolute; right: 3cqh; bottom: 3cqh;
+  font: 400 3.4cqh/1 var(--font-display); color: var(--color-ink); opacity: 0.8;
+  text-shadow: 0 0 0.25em var(--color-shade); white-space: nowrap;
+}
 body.comparing .source { opacity: 1; }
 
 .transport { display: flex; align-items: center; gap: var(--space-md); min-height: var(--control-h); }
@@ -232,7 +246,7 @@ body[data-style="lines"] #ink-row { display: none; }
   .frame { flex: none; padding: var(--space-sm) var(--space-xs) var(--space-xs); }
   /* the picture takes the full width, but a tall (portrait) video stops at about a third of
      the screen's height, so the pinned stage leaves room for the settings */
-  .calc, .source { width: min(100%, calc(34svh * var(--aspect, 1.7778))); max-height: none; }
+  .calc, .source, .credit-box { width: min(100%, calc(34svh * var(--aspect, 1.7778))); max-height: none; }
   .screen {
     padding: var(--space-md) max(var(--gutter), env(safe-area-inset-right)) var(--space-sm) max(var(--gutter), env(safe-area-inset-left));
   }

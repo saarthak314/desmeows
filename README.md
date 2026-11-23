@@ -99,3 +99,8 @@ traces a video's edges into coloured lines and plays them in a local Desmos page
   [Instrument Serif](https://github.com/Instrument/instrument-serif) and
   [JetBrains Mono](https://github.com/JetBrains/JetBrainsMono), all under the SIL Open
   Font License 1.1; the licences are in `web/fonts/licenses/`.
+
+## License
+
+[MIT](LICENSE), except the fonts in `web/fonts/`, which keep their own SIL Open
+Font License.

@@ -32,6 +32,8 @@
   --color-rule: rgb(238 241 246 / 0.16);
   --color-rule-soft: rgb(238 241 246 / 0.09);
   --color-hover: rgb(238 241 246 / 0.04);
+  --color-shade: rgb(6 7 10 / 0.55);
+  --color-glow: rgb(238 241 246 / 0.6);
   --color-accent: #9db8ef;
   --color-accent-2: #6f8fcf;
   --color-accent-soft: #cfdcf8;
