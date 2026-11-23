@@ -279,7 +279,9 @@ class Pool {
 // ---------------------------------------------------------------- tracing
 
 $('trace').addEventListener('click', () => trace());
-$('stop').addEventListener('click', () => { stopping = true; $('stop').disabled = true; });
+// Stop also cuts every wait in a running trace short, even one on a decoder that has stalled
+let stopTrace = () => {};
+$('stop').addEventListener('click', () => { stopping = true; $('stop').disabled = true; stopTrace(); });
 
 async function trace() {
   if (!media) return;
@@ -320,6 +322,7 @@ async function trace() {
   let read = 0, wake = null, abort = false;
   let fail;
   const failure = new Promise((_, rej) => (fail = rej));
+  stopTrace = () => fail(new Stop());
   failure.catch(() => {});
   const waitRead = () => Promise.race([new Promise((r) => (wake = r)), failure]);
   // a decoder that stops answering (the GPU's decoders are shared with every other tab) would
@@ -332,7 +335,10 @@ async function trace() {
 
   const reader = (async () => {
     const TW = 160, TH = even(160 * H / W);
-    const thumbSink = new CanvasSink(media.video, { width: TW, height: TH, fit: 'fill', poolSize: 1 });
+    // The thumbnails are decoded in software. The tracing pass waits on the scenes this pass
+    // finds, and its hardware decoder holds decoded frames while it waits; if both passes drew
+    // on the GPU's limited decoder surfaces, this one could starve and neither would move.
+    const thumbSink = new CanvasSink(media.video, { width: TW, height: TH, fit: 'fill', poolSize: 1, decoderOptions: { hardwareAcceleration: 'prefer-software' } });
     const readThumb = frameReader(TW, TH);
     // thumbnails are read back in two small workers (a few in flight, taken in order), so the
     // main thread never waits on the GPU; without OffscreenCanvas they are read here instead
