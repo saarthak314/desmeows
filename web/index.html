@@ -27,6 +27,7 @@
      (in production they revalidate it, as Vercel's Age header leaves it stale; sw.js serves it
      once installed) -->
 <link rel="modulepreload" href="frame-worker.js" fetchpriority="low">
+<link rel="modulepreload" href="stabilise.js" fetchpriority="low">
 <link rel="modulepreload" href="tracer.js" fetchpriority="low">
 <!-- Desmos (about 1 MB, behind a redirect to the current v1.11.x) is the longest download and a
      trace waits for it, so it starts now, at low priority; app.js runs it once the page is up.

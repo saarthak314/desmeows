@@ -15,7 +15,7 @@ const OFF = false;
 
 // The app's own files, compared with the site after each visit. A new file the app loads
 // belongs here; one left out still works, from the network.
-const APP = ['./', 'app.css', 'tokens.css', 'base.css', 'app.js', 'render.js', 'reel.js', 'palette.js', 'tracer.js', 'frame-worker.js', 'raster-worker.js'];
+const APP = ['./', 'app.css', 'tokens.css', 'base.css', 'app.js', 'render.js', 'reel.js', 'palette.js', 'tracer.js', 'frame-worker.js', 'stabilise.js', 'raster-worker.js'];
 // Files whose content never changes under the same name (vercel.json caches them for a year).
 const FIXED = [
   'fonts/instrument-serif-400.woff2', 'fonts/ibm-plex-mono-400.woff2', 'fonts/ibm-plex-mono-600.woff2',
