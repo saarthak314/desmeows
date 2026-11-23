@@ -146,6 +146,12 @@ function grid() {
     }
   }
 }
+// Lab of each 5-bit cell's centre colour, as buildLUT measures it.
+export function cellLab() {
+  if (!GRID) grid();
+  return GRID;
+}
+
 export function buildLUT(C) {
   const k = C.length / 3;
   const lut = new Uint8Array(32768);

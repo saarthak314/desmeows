@@ -335,6 +335,23 @@ async function trace() {
   const watchdog = setInterval(() => {
     if (performance.now() - lastTick > 30000) fail(new Error('the video decoder stopped responding. Close other tabs playing video and try again.'));
   }, 2000);
+  // The stabiliser (stabilise.js) has to see every frame in order, so it can't be spread over
+  // the pool by frame; it is spread by strip instead: each of these workers holds one fixed
+  // horizontal strip of every frame (fixed by the frame size alone, so every machine gives the
+  // same output). Every tracing worker has a channel to each, and sends its frame's strips
+  // there itself (see frame-worker.js).
+  const strips = [];
+  for (let k = 0, n = H >= 64 ? 2 : 1; k < n; k++) {
+    const worker = new Worker(new URL('./frame-worker.js', import.meta.url), { type: 'module' });
+    worker.onerror = (e) => fail(new Error(e.message || 'Tracer failed'));
+    strips.push({ h: Math.round((k + 1) * H / n) - Math.round(k * H / n), worker, ports: [] });
+  }
+  for (const w of pool.workers) {
+    const ports = strips.map((t) => { const ch = new MessageChannel(); t.ports.push(ch.port2); return ch.port1; });
+    w.postMessage({ type: 'stable-ports', ports }, ports);
+  }
+  for (const t of strips) t.worker.postMessage({ type: 'stable-strip', ports: t.ports }, t.ports);
+  const stripRows = strips.map((t) => t.h);
 
   const reader = (async () => {
     const TW = 160, TH = even(160 * H / W);
@@ -354,7 +371,8 @@ async function trace() {
       if (style !== 'paint') { sceneReady(s).done(); return; }
       const samples = sceneSamples(thumbs, scene, s);
       pool.run({ type: 'kmeans', samples, k: tier.k, iters: tier.iters }, [samples.buffer]).then((r) => {
-        pool.post({ type: 'palette-add', index: s, lut: r.lut });
+        // the stabiliser labels every pixel, so only it needs the palette
+        for (const t of strips) t.worker.postMessage({ type: 'stable-palette', index: s, lut: r.lut, centres: r.centres });
         sceneReady(s).done();
       }, (e) => fail(e));
     };
@@ -416,7 +434,7 @@ async function trace() {
       while (read <= id) await waitRead();
       await Promise.race([sceneReady(scene[id]), failure]);
       let job;
-      const msg = { id, w: W, h: H, opts: { ...opts, scene: scene[id] } };
+      const msg = { id, w: W, h: H, strips: stripRows, opts: { ...opts, scene: scene[id] } };
       if (viaBitmap) {
         msg.bitmap = await createImageBitmap(wrapped.canvas);
         job = pool.run(msg, [msg.bitmap]);
@@ -440,7 +458,8 @@ async function trace() {
       while (pool.inFlight >= pool.size * 2) await Promise.race([...pending, failure]);
     }
     await reader;
-    await Promise.all(pending);
+    // raced too: a stabiliser that fails leaves its frames' jobs waiting
+    await Promise.race([Promise.all(pending), failure]);
     finishTrace();
   } catch (err) {
     if (err instanceof Stop) {
@@ -459,6 +478,7 @@ async function trace() {
     closeFrames();
     closeThumbs();
     stopReaders();
+    for (const t of strips) t.worker.terminate();
     pool.terminate();
   }
 }
