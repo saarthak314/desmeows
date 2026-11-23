@@ -1,0 +1,5 @@
+.hallmark
+.vercel
+.env*
+.gitignore
+.DS_Store

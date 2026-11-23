@@ -1,0 +1,9 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 32 32">
+  <title>desmeows</title>
+  <!-- a cat's head as one traced polygon, in the site's fur colour on its space-blue ground -->
+  <rect width="32" height="32" rx="7" fill="#0e1016"/>
+  <polygon points="6,5 12.5,11 19.5,11 26,5 27.5,17 24,24.5 16,28 8,24.5 4.5,17" fill="#e0bd92"/>
+  <polygon points="8.5,14.5 13.5,16.5 13,19 10,18.5" fill="#0e1016"/>
+  <polygon points="23.5,14.5 18.5,16.5 19,19 22,18.5" fill="#0e1016"/>
+  <polygon points="14.5,21.5 17.5,21.5 16,23" fill="#7a5f4a"/>
+</svg>

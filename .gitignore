@@ -1,0 +1,9 @@
+# Only the web app is tracked; clips, exports, prototypes and tool state stay local.
+/*
+!/.gitignore
+!/site/
+
+site/.hallmark/
+site/.vercel/
+site/.env*
+.DS_Store

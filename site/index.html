@@ -1,0 +1,155 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>desmeows</title>
+<meta name="description" content="Redraw any video as coloured polygons in a live Desmos graph, then export it as an mp4. Runs in your browser.">
+<meta name="theme-color" content="#0e1016">
+<link rel="icon" href="favicon.svg" type="image/svg+xml">
+<link rel="icon" href="favicon-32.png" type="image/png" sizes="32x32">
+<link rel="apple-touch-icon" href="apple-touch-icon.png">
+<link rel="preload" href="fonts/ibm-plex-mono-400.woff2" as="font" type="font/woff2" crossorigin>
+<link rel="preload" href="fonts/jetbrains-mono-symbols.woff2" as="font" type="font/woff2" crossorigin>
+<link rel="stylesheet" href="app.css">
+<!-- Desmos API. The key is the public demo key from the Desmos API docs: fine for running
+     this locally, replace it with your own (desmos.com/api) before putting the page online. -->
+<script src="https://www.desmos.com/api/v1.11/calculator.js?apiKey=dcb31709b452b1cf9dc26972add0fda6"></script>
+<script type="module" src="app.js"></script>
+</head>
+<body data-state="empty">
+
+<header class="bar">
+  <a class="wordmark" href="./">desmeows</a>
+  <div class="bar-file">
+    <span class="file-name" id="file-name"></span>
+    <button class="btn btn--quiet" id="new-video" type="button" hidden>new video</button>
+  </div>
+</header>
+
+<main class="work" id="work">
+
+  <section class="stage" aria-label="Video">
+    <label class="drop" id="drop" for="file">
+      <h1>any video, redrawn in desmos</h1>
+      <p class="lead">every frame becomes coloured polygons in a live graph you can play, scrub, and export.</p>
+      <span class="btn btn--primary drop-action">choose an mp4</span>
+      <span class="drop-note"><span class="drop-pointer">or drop one anywhere on this page. </span>it never leaves your device.</span>
+      <input class="visually-hidden" type="file" id="file" accept="video/mp4,video/quicktime,video/webm,.mp4,.mov,.webm,.m4v">
+      <ol class="steps">
+        <li>cuts are found, and each scene gets its own palette.</li>
+        <li>every patch of colour is traced as an exact polygon.</li>
+        <li>desmos draws each frame, live or into an mp4.</li>
+      </ol>
+    </label>
+
+    <div class="screen" id="screen" hidden>
+      <div class="frame" id="frame">
+        <p class="frame-label frame-label--left" id="frame-label">source</p>
+        <p class="frame-label frame-label--right num" id="frame-note" role="status"></p>
+        <canvas class="source" id="source" aria-label="Source video frame"></canvas>
+        <div class="calc" id="calc" aria-label="Desmos graph of the current frame"></div>
+      </div>
+      <div class="transport" id="transport">
+        <button class="icon-btn" id="play" type="button" aria-label="Play" disabled>
+          <svg class="i-play" viewBox="0 0 16 16" aria-hidden="true"><path d="M4 2.5v11l9-5.5z"/></svg>
+          <svg class="i-pause" viewBox="0 0 16 16" aria-hidden="true"><path d="M4 2.5h3v11H4zM9 2.5h3v11H9z"/></svg>
+        </button>
+        <input class="scrub" id="scrub" type="range" min="0" max="0" value="0" step="1" aria-label="Frame" disabled>
+        <span class="time num" id="time">0:00.0 / 0:00.0</span>
+        <button class="btn btn--quiet compare" id="compare" type="button" aria-pressed="false" disabled>hold to compare</button>
+      </div>
+    </div>
+  </section>
+
+  <aside class="sheet" id="sheet" aria-label="Settings" hidden>
+
+    <section class="block" id="settings">
+      <h2 class="head">trace</h2>
+
+      <fieldset class="row">
+        <legend>style</legend>
+        <div class="seg" role="radiogroup">
+          <label><input type="radio" name="style" value="paint" checked><span>paint</span></label>
+          <label><input type="radio" name="style" value="lines"><span>lines</span></label>
+        </div>
+      </fieldset>
+
+      <fieldset class="row">
+        <legend>fidelity</legend>
+        <div class="seg" role="radiogroup">
+          <label><input type="radio" name="fidelity" value="draft"><span>draft</span></label>
+          <label><input type="radio" name="fidelity" value="fine" checked><span>fine</span></label>
+          <label><input type="radio" name="fidelity" value="max"><span>max</span></label>
+          <label><input type="radio" name="fidelity" value="limit"><span>limit</span></label>
+        </div>
+        <p class="row-note" id="fidelity-note"></p>
+      </fieldset>
+
+      <fieldset class="row">
+        <legend>frame rate</legend>
+        <div class="seg" role="radiogroup" id="fps-seg">
+          <label><input type="radio" name="fps" value="source" checked><span id="fps-source">source</span></label>
+          <label><input type="radio" name="fps" value="24"><span>24</span></label>
+          <label><input type="radio" name="fps" value="12"><span>12</span></label>
+        </div>
+      </fieldset>
+
+      <div class="row" id="ink-row">
+        <label class="switch" for="ink">
+          <input type="checkbox" id="ink" role="switch" checked>
+          <span class="switch-track" aria-hidden="true"></span>
+          <span>ink lines over the paint</span>
+        </label>
+      </div>
+
+      <div class="actions">
+        <button class="btn btn--primary" id="trace" type="button">trace video</button>
+        <button class="btn" id="stop" type="button" hidden>stop</button>
+      </div>
+
+      <div class="progress" id="progress" hidden>
+        <p class="progress-line"><span id="progress-label" role="status">reading frames</span><span class="num" id="progress-figure">0</span></p>
+        <p class="rail" aria-hidden="true"><span class="rail-done" id="meter"></span></p>
+      </div>
+
+      <p class="error" id="error" role="alert" hidden></p>
+    </section>
+
+    <section class="block" id="result" hidden>
+      <h2 class="head">result</h2>
+      <dl class="figures">
+        <div><dt>frames</dt><dd class="num" id="r-frames"></dd></div>
+        <div><dt>scenes</dt><dd class="num" id="r-scenes"></dd></div>
+        <div><dt>shapes a frame</dt><dd class="num" id="r-shapes"></dd></div>
+        <div><dt>vertices a frame</dt><dd class="num" id="r-verts"></dd></div>
+      </dl>
+      <p class="row-note" id="live-note"></p>
+    </section>
+
+    <section class="block" id="export" hidden>
+      <h2 class="head">export</h2>
+      <fieldset class="row">
+        <legend>size</legend>
+        <div class="seg" role="radiogroup" id="size-seg"></div>
+      </fieldset>
+      <div class="actions">
+        <button class="btn btn--primary" id="export-mp4" type="button">export mp4</button>
+        <button class="btn" id="save-page" type="button">save as page</button>
+      </div>
+      <div class="progress" id="export-progress" hidden>
+        <p class="progress-line"><span id="export-label" role="status"></span><span class="num" id="export-figure">0</span></p>
+        <p class="rail" aria-hidden="true"><span class="rail-done" id="export-meter"></span></p>
+        <button class="btn btn--quiet" id="export-cancel" type="button">cancel export</button>
+      </div>
+      <p class="download" id="download" hidden></p>
+    </section>
+
+  </aside>
+</main>
+
+<div class="offscreen" aria-hidden="true"><div id="export-calc"></div></div>
+
+<noscript><p class="noscript">desmeows traces video in your browser and needs javascript turned on.</p></noscript>
+</body>
+</html>

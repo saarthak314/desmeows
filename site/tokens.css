@@ -1,0 +1,51 @@
+/* Tokens taken from sarthak's site (../site/static/index.css): the space-blue ground, the
+   suit's whites for ink, the earth's blues for structure, warm kept for what is live.
+   Instrument Serif for the name and the one big head, IBM Plex Mono for everything else,
+   and the JetBrains Mono symbol subset for the box-drawing rails. */
+
+@font-face { font-display: swap; font-family: "IBM Plex Mono"; font-style: normal; font-weight: 400; src: url("./fonts/ibm-plex-mono-400.woff2") format("woff2"); }
+@font-face { font-display: swap; font-family: "IBM Plex Mono"; font-style: normal; font-weight: 600; src: url("./fonts/ibm-plex-mono-600.woff2") format("woff2"); }
+@font-face { font-display: swap; font-family: "Instrument Serif"; font-style: normal; font-weight: 400; src: url("./fonts/instrument-serif-400.woff2") format("woff2"); }
+@font-face {
+  font-display: swap; font-family: "JBM Symbols"; font-style: normal; font-weight: 400;
+  src: url("./fonts/jetbrains-mono-symbols.woff2") format("woff2");
+  unicode-range: U+0020, U+0023, U+0027, U+002A-002B, U+002E-002F, U+003A, U+005C, U+00B7, U+2022, U+03BB, U+2190-21FF, U+2500-25FF;
+}
+
+:root {
+  color-scheme: dark;
+  --space-3xs: 2px; --space-2xs: 4px; --space-xs: 8px; --space-sm: 12px; --space-md: 16px; --space-lg: 24px; --space-xl: 40px; --space-2xl: 64px; --space-3xl: 96px; --space-4xl: 144px;
+  --text-xs: 0.75rem; --text-sm: 0.8125rem; --text-md: 1rem; --text-lg: 1.25rem; --text-xl: 1.45rem; --text-2xl: 1.9rem; --text-3xl: 2.4rem;
+  --text-display-s: 1.45rem; --text-display: 1.9rem; --text-section: 1.25rem; --text-title: 1rem; --text-lead: 1rem;
+  --ease-out: cubic-bezier(0.19, 1, 0.22, 1); --ease-in: cubic-bezier(0.7, 0, 0.84, 0); --ease-in-out: cubic-bezier(0.65, 0, 0.35, 1);
+  --dur-micro: 150ms; --dur-short: 220ms; --dur-long: 420ms;
+  --container: 1440px; --gutter: 48px; --gap-columns: 32px; --section-gap-s: 120px; --section-gap: 144px; --section-gap-l: 176px;
+  --z-base: 1; --z-raised: 10; --z-dropdown: 100; --z-sticky: 200; --z-sticky-nav: 300; --z-modal: 400; --z-toast: 500; --z-tooltip: 600;
+
+  --color-paper: #0e1016;
+  --color-paper-2: #151821;
+  --color-paper-3: #1b1f2a;
+  --color-ink: #eef1f6;
+  --color-ink-2: #b2b7c2;
+  --color-muted: #7f8592;
+  --color-faint: #525866;
+  --color-rule: rgb(238 241 246 / 0.16);
+  --color-rule-soft: rgb(238 241 246 / 0.09);
+  --color-hover: rgb(238 241 246 / 0.04);
+  --color-accent: #9db8ef;
+  --color-accent-2: #6f8fcf;
+  --color-accent-soft: #cfdcf8;
+  --color-accent-ink: #0e1016;
+  --color-warm: #e0bd92;
+  --color-focus: #6f8fcf;
+  --color-error: #d98c7a;
+  --color-success: #9db8ef;
+
+  --font-display: "Instrument Serif", Georgia, serif;
+  --font-body: "IBM Plex Mono", ui-monospace, Menlo, monospace;
+  --font-art: "JBM Symbols", ui-monospace, Menlo, monospace;
+  --font-outlier: var(--font-display);
+
+  --radius-card: 0; --radius-pill: 0; --rule-hair: 1px; --shadow-card: none;
+  --tracking-display: 0; --display-weight: 400;
+}
