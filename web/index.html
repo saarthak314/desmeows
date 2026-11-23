@@ -25,6 +25,7 @@
 <link rel="modulepreload" href="https://cdn.jsdelivr.net/npm/mediabunny@1.65.2/dist/bundles/mediabunny.min.mjs">
 <!-- the tracing workers' module, fetched now so a trace's workers all find it in the HTTP
      cache (vercel.json lets it stay fresh for a few minutes) -->
+<link rel="modulepreload" href="frame-worker.js" fetchpriority="low">
 <link rel="modulepreload" href="tracer.js" fetchpriority="low">
 <!-- Desmos is loaded by app.js once the page is up; warm the connection for it -->
 <link rel="preconnect" href="https://www.desmos.com">
