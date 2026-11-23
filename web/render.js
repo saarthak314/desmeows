@@ -129,8 +129,11 @@ export class Painter {
 // Draws a frame's polygons straight onto a 2D canvas: the same shapes, colours, order and
 // line widths Desmos is given, without Desmos's parse, evaluate and screenshot round trip.
 // ctx is outW x outH; s = output pixels per trace pixel. Widths mirror widthExprs at scale 1.
-export function rasterize(ctx, frame, style, W, H, s) {
+// With a window { x, y, w, h } (output pixels), ctx is that small and only the shapes reaching
+// into it are drawn: the export reads the credit corner's brightness this way, cheaply.
+export function rasterize(ctx, frame, style, W, H, s, win = null) {
   const u = s / UNITS, Hu = H * UNITS; // vertex units -> output pixels
+  const ox = win ? win.x : 0, oy = win ? win.y : 0;
   const bg = style === 'paint' && frame.mean ? frame.mean : [0, 0, 0];
   ctx.fillStyle = `rgb(${bg[0]},${bg[1]},${bg[2]})`;
   ctx.fillRect(0, 0, ctx.canvas.width, ctx.canvas.height);
@@ -140,14 +143,20 @@ export function rasterize(ctx, frame, style, W, H, s) {
   const line = Math.max(0.6, (style === 'lines' ? 1.6 : 1.1) * Math.max(1, W / 640)) * s;
   const layer = (L, fill) => {
     if (!L) return;
-    ctx.lineWidth = fill ? seal : line;
+    const width = fill ? seal : line;
+    ctx.lineWidth = width;
+    // the window in vertex units, grown by half a stroke and a trace pixel for antialiasing
+    const r = width / 2 / u + UNITS;
+    const box = win && [ox / u - r, (ox + win.w) / u + r, Hu - (oy + win.h) / u - r, Hu - oy / u + r];
+    const V = L.verts;
     let v = 0;
     for (let k = 0; k < L.counts.length; k++) {
       const c = L.counts[k];
+      if (box && !reaches(V, v, c, box)) { v += c; continue; }
       const col = `rgb(${L.rgb[3 * k]},${L.rgb[3 * k + 1]},${L.rgb[3 * k + 2]})`;
       ctx.beginPath();
-      ctx.moveTo(L.verts[2 * v] * u, (Hu - L.verts[2 * v + 1]) * u);
-      for (let i = 1; i < c; i++) ctx.lineTo(L.verts[2 * (v + i)] * u, (Hu - L.verts[2 * (v + i) + 1]) * u);
+      ctx.moveTo(V[2 * v] * u - ox, (Hu - V[2 * v + 1]) * u - oy);
+      for (let i = 1; i < c; i++) ctx.lineTo(V[2 * (v + i)] * u - ox, (Hu - V[2 * (v + i) + 1]) * u - oy);
       ctx.closePath();
       v += c;
       if (fill) { ctx.fillStyle = col; ctx.fill(); }
@@ -157,4 +166,17 @@ export function rasterize(ctx, frame, style, W, H, s) {
   };
   layer(frame.fill, true);
   layer(frame.line, false);
+}
+
+// whether the bounding box of the c vertices from v meets [x0, x1, y0, y1] (vertex units)
+function reaches(V, v, c, [x0, x1, y0, y1]) {
+  let minX = Infinity, maxX = -Infinity, minY = Infinity, maxY = -Infinity;
+  for (let i = 2 * v, end = 2 * (v + c); i < end; i += 2) {
+    const x = V[i], y = V[i + 1];
+    if (x < minX) minX = x;
+    if (x > maxX) maxX = x;
+    if (y < minY) minY = y;
+    if (y > maxY) maxY = y;
+  }
+  return maxX >= x0 && minX <= x1 && maxY >= y0 && minY <= y1;
 }

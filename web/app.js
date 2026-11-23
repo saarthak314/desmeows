@@ -634,6 +634,9 @@ new ResizeObserver(layoutFrame).observe($('frame'));
 
 // ---------------------------------------------------------------- export
 
+// imported here, beside the export code that uses them
+import { VideoSampleSource, VideoSample } from 'https://cdn.jsdelivr.net/npm/mediabunny@1.65.2/dist/bundles/mediabunny.min.mjs';
+
 // The graph is vector, so it can be drawn larger than the source.
 async function buildSizes() {
   const seg = $('size-seg');
@@ -712,17 +715,38 @@ async function creditStamp(outW, outH) {
   const dark = stamp(colorToken('--color-paper'), colorToken('--color-glow'));
   const margin = Math.round(outH * CREDIT.margin);
   const x = outW - margin - light.width + pad, y = outH - margin - light.height + pad;
+  // the corner whose brightness picks the stamp: the box the text sits in
+  const win = { x: x + pad, y: y + pad, w: light.width - 2 * pad, h: light.height - 2 * pad };
   let onBright = false;
+  const onBrightCorner = (d) => {
+    let sum = 0;
+    for (let i = 0; i < d.length; i += 16) sum += 0.2126 * d[i] + 0.7152 * d[i + 1] + 0.0722 * d[i + 2];
+    const lum = sum / (d.length / 16) / 255;
+    // hysteresis, so a corner hovering near the middle doesn't flicker between the two
+    if (onBright ? lum < 0.5 : lum > 0.62) onBright = !onBright;
+    return onBright;
+  };
+  let corner = null;
   return {
     // stamp onto a frame already drawn into ctx
     draw(ctx) {
-      const d = ctx.getImageData(x + pad, y + pad, light.width - 2 * pad, light.height - 2 * pad).data;
-      let sum = 0;
-      for (let i = 0; i < d.length; i += 16) sum += 0.2126 * d[i] + 0.7152 * d[i + 1] + 0.0722 * d[i + 2];
-      const lum = sum / (d.length / 16) / 255;
-      // hysteresis, so a corner hovering near the middle doesn't flicker between the two
-      if (onBright ? lum < 0.5 : lum > 0.62) onBright = !onBright;
-      ctx.drawImage(onBright ? dark : light, x, y);
+      const bright = onBrightCorner(ctx.getImageData(win.x, win.y, win.w, win.h).data);
+      ctx.drawImage(bright ? dark : light, x, y);
+    },
+    // For frames drawn and stamped in workers: which stamp frame i gets, from just its corner
+    // drawn again here (a few shapes), so no full frame is ever read back. Call in frame order.
+    pick(frame, style, W, H) {
+      if (!corner) {
+        const c = document.createElement('canvas');
+        c.width = win.w; c.height = win.h;
+        corner = c.getContext('2d', { willReadFrequently: true });
+      }
+      rasterize(corner, frame, style, W, H, outW / W, win);
+      return onBrightCorner(corner.getImageData(0, 0, win.w, win.h).data);
+    },
+    // both stamps and where they go, for the workers
+    async stamps() {
+      return { light: await createImageBitmap(light), dark: await createImageBitmap(dark), x, y };
     },
   };
 }
@@ -751,16 +775,45 @@ async function exportMp4() {
     exportCalc.setExpressions(widthExprs(style, W, 1));
   }
 
-  const canvas = document.createElement('canvas');
-  canvas.width = outW; canvas.height = outH;
-  const ctx = canvas.getContext('2d', { willReadFrequently: true });
-  ctx.imageSmoothingQuality = 'high';
   const credit = settings.credit ? await creditStamp(outW, outH) : null;
-  let output = null;
+  // Direct export draws and stamps frames in parallel workers, a few ahead of the encoder, and
+  // takes them back in order. Workers with WebCodecs hand back NV12 VideoFrames that go to the
+  // encoder untouched; otherwise bitmaps, which go through a canvas here.
+  const parallel = !viaDesmos && typeof OffscreenCanvas !== 'undefined';
+  let pools = [], asFrames = false, output = null;
+  const ahead = new Map();
+  const stopWorkers = () => {
+    for (const p of ahead.values()) p.then((r) => (r.frame || r.bitmap).close(), () => {});
+    ahead.clear();
+    for (const pool of pools) pool.terminate();
+    pools = [];
+  };
   try {
+    if (parallel) {
+      // Past three GPU workers the GPU process falls behind; the other cores draw on the CPU,
+      // leaving two for this thread and the encoder.
+      const cores = navigator.hardwareConcurrency || 4;
+      const gpu = Math.max(2, Math.min(3, cores - 2));
+      const cpu = Math.max(0, Math.min(12, cores - gpu - 2));
+      const stamps = credit ? await credit.stamps() : null;
+      const init = { type: 'init', W, H, style, outW, outH, fps, credit: stamps };
+      const kinds = [{ n: gpu, cpu: false }, { n: cpu, cpu: true }].filter((k) => k.n > 0);
+      pools = kinds.map((k) => new Pool(k.n, './raster-worker.js'));
+      const replies = await Promise.all(pools.map((p, k) => p.broadcast({ ...init, cpu: kinds[k].cpu })));
+      asFrames = replies.flat().every((r) => r.frames);
+    }
+    let canvas = null, ctx = null;
+    if (!asFrames) {
+      canvas = document.createElement('canvas');
+      canvas.width = outW; canvas.height = outH;
+      ctx = canvas.getContext('2d', { willReadFrequently: true });
+      ctx.imageSmoothingQuality = 'high';
+    }
+
     output = new Output({ format: new Mp4OutputFormat({ fastStart: 'in-memory' }), target: new BufferTarget() });
     // ~0.16 bits a pixel: flat fills and hard edges compress well, so this stays sharp at a sane size.
-    const video = new CanvasSource(canvas, { codec: 'avc', bitrate: Math.round(outW * outH * fps * 0.16), keyFrameInterval: 2 });
+    const encoding = { codec: 'avc', bitrate: Math.round(outW * outH * fps * 0.16), keyFrameInterval: 2 };
+    const video = asFrames ? new VideoSampleSource(encoding) : new CanvasSource(canvas, encoding);
     output.addVideoTrack(video, { frameRate: fps });
     let audio = null;
     if (media.audio && media.audio.codec) {
@@ -769,58 +822,63 @@ async function exportMp4() {
     }
     await output.start();
 
-    // Direct export draws frames in parallel workers, a few ahead of the encoder, and takes
-    // them back in order. The window is sized so in-flight bitmaps stay under ~600 MB.
-    const parallel = !viaDesmos && typeof OffscreenCanvas !== 'undefined';
-    let raster = null;
-    const ahead = new Map();
+    // Each frame goes to the first pool with an idle worker, GPU first: it is the quicker one,
+    // and the next frame dealt is the one the encoder needs soonest. In-flight frames (drawn or
+    // not, until the encoder takes them; NV12 or RGBA) stay under ~600 MB.
+    const workers = pools.reduce((n, p) => n + p.size, 0);
+    const depth = Math.max(2, Math.min(workers * 2, Math.floor(600e6 / (outW * outH * (asFrames ? 1.5 : 4)))));
     let sent = 0;
-    const sendNext = () => {
-      if (!raster || sent >= frames.length) return;
-      const i = sent++;
-      ahead.set(i, raster.run({ i, frame: frames[i], style, W, H, outW, outH }));
+    const deal = () => {
+      while (pools.length && sent < frames.length && ahead.size < depth) {
+        const pool = pools.find((p) => p.inFlight < p.size);
+        if (!pool) return;
+        const i = sent++;
+        const bright = credit ? credit.pick(frames[i], style, W, H) : false;
+        const job = pool.run({ i, frame: frames[i], bright });
+        job.then(deal, () => {});
+        ahead.set(i, job);
+      }
     };
-    if (parallel) {
-      const n = Math.max(2, Math.min(8, (navigator.hardwareConcurrency || 4) - 2));
-      raster = new Pool(n, './raster-worker.js');
-      const window = Math.max(2, Math.min(n * 2, Math.floor(600e6 / (outW * outH * 4))));
-      for (let k = 0; k < window; k++) sendNext();
-    }
+    deal();
+    const take = async (i) => {
+      const r = await ahead.get(i);
+      ahead.delete(i);
+      deal();
+      return r;
+    };
 
     const started = performance.now();
-    try {
     for (let i = 0; i < frames.length; i++) {
       if (exportCancel) throw new Stop();
-      if (parallel) {
-        const { bitmap } = await ahead.get(i);
-        ahead.delete(i);
-        sendNext();
-        ctx.drawImage(bitmap, 0, 0);
-        bitmap.close();
-      } else if (viaDesmos) {
-        exportPainter.draw(frames[i], style);
-        const url = await screenshot(exportCalc, W, H, outW / W);
-        const img = new Image();
-        img.src = url;
-        await img.decode();
-        ctx.drawImage(img, 0, 0, outW, outH);
+      if (asFrames) {
+        const { frame } = await take(i);
+        const sample = new VideoSample(frame, { timestamp: i / fps, duration: 1 / fps });
+        try { await video.add(sample); } finally { sample.close(); }
       } else {
-        rasterize(ctx, frames[i], style, W, H, outW / W);
+        if (parallel) {
+          const { bitmap } = await take(i);
+          ctx.drawImage(bitmap, 0, 0);
+          bitmap.close();
+        } else if (viaDesmos) {
+          exportPainter.draw(frames[i], style);
+          const url = await screenshot(exportCalc, W, H, outW / W);
+          const img = new Image();
+          img.src = url;
+          await img.decode();
+          ctx.drawImage(img, 0, 0, outW, outH);
+        } else {
+          rasterize(ctx, frames[i], style, W, H, outW / W);
+        }
+        if (credit && !parallel) credit.draw(ctx);
+        await video.add(i / fps, 1 / fps);
       }
-      if (credit) credit.draw(ctx);
-      await video.add(i / fps, 1 / fps);
       const left = (performance.now() - started) / (i + 1) * (frames.length - i - 1);
       $('export-figure').textContent = `${i + 1} / ${frames.length}`;
       const verb = viaDesmos ? 'drawing in desmos' : 'drawing frames';
       $('export-label').textContent = i < 3 ? verb : `${verb}, about ${fmtDuration(left)} left`;
       $('export-meter').style.setProperty('--progress', (i + 1) / frames.length);
     }
-    } finally {
-      if (raster) {
-        for (const p of ahead.values()) p.then((r) => r.bitmap.close(), () => {});
-        raster.terminate();
-      }
-    }
+    stopWorkers();
 
     if (audio) {
       $('export-label').textContent = 'adding the sound';
@@ -845,6 +903,7 @@ async function exportMp4() {
     if (output && output.state !== 'finalized') await output.cancel().catch(() => {});
     if (!(err instanceof Stop)) { console.error(err); showExportError(`export stopped: ${err.message || err}`); }
   } finally {
+    stopWorkers();
     setState('ready');
     $('export-progress').hidden = true;
     for (const b of ['export-mp4', 'save-page', 'trace']) $(b).disabled = false;
