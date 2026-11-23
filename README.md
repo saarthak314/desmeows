@@ -50,10 +50,11 @@ seconds; *limit* averages 16,500 shapes and 123,000 vertices a frame and traces 
 9 seconds. Exporting the *fine* trace at 1080p takes 2.5 seconds; the *limit* trace at
 4K, about 11 seconds. The same video traces to the same shapes every time.
 
-Desmos can't redraw thousands of shapes 30 times a second, so while a clip plays the
-live graph draws each frame's largest 600 shapes (300 on phones), about 23 frames a
-second of the clip's 30 at *fine*. Pause to see every shape. The export always draws all
-of them.
+Desmos can't redraw thousands of shapes 30 times a second, so while a clip plays, its
+frames are drawn just ahead of the playhead by workers using the export's renderer
+(every shape, the same pixels Desmos would draw) and shown over the graph; pause, and
+the frame goes back to the Desmos graph. A clip starts playing about half a second after
+you press Trace, while the rest is still tracing.
 
 ## Run it locally
 

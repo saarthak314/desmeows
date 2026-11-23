@@ -1,8 +1,8 @@
 # desmeows web app
 
 A static site with no build step: plain ES modules, one stylesheet, self-hosted fonts.
-Everything runs in the browser; the only network requests are for the page itself,
-the Desmos API and the mediabunny module from jsDelivr.
+Everything runs in the browser; the only network requests are for the page's own files
+(mediabunny included, vendored under `vendor/`) and the Desmos API.
 
 ## Files
 
@@ -14,7 +14,10 @@ the Desmos API and the mediabunny module from jsDelivr.
 | `tracer.js` | the tracer, one frame per message |
 | `palette.js` | scene-cut detection, k-means palettes in Lab, the 32×32×32 colour lookup |
 | `render.js` | turns a traced frame into Desmos expressions, or draws it straight onto a canvas; shared by the player, the exporter and saved pages |
-| `raster-worker.js` | the export's drawing worker: draws a frame at the output size, stamps the credit, converts it to the encoder's YUV |
+| `raster-worker.js` | the drawing worker: draws a frame at the output size; for the export it stamps the credit and converts to the encoder's YUV, for playback it returns a bitmap |
+| `reel.js` | smooth playback: frames drawn ahead of the playhead by drawing workers, shown over the graph |
+| `sw.js` | the service worker: later visits start from a stored copy of the app and Desmos (see Loading) |
+| `vendor/` | mediabunny 1.65.2, as published, with its licence |
 | `app.css`, `tokens.css`, `base.css` | styles: page rules, the design tokens, shared base rules |
 | `fonts/` | IBM Plex Mono, Instrument Serif and a JetBrains Mono symbol subset, with their licences |
 | `vercel.json`, `.vercelignore` | cache and security headers, and what stays out of a deploy |
@@ -117,9 +120,16 @@ that shaped `render.js`:
   across fixed slots: 8 for fills, 4 for lines.
 - The API build has no `segment()`, hence the out-and-back polygons.
 - `Painter` sends only expressions whose latex changed since the last frame.
-- Playback is clocked: a late frame is skipped, never queued. While playing, the live
-  graph draws each frame's largest 600 shapes (300 on touch devices); paused and
-  exported frames get every shape.
+- Desmos can't redraw thousands of shapes 30 times a second, so playback doesn't ask it
+  to. While a clip plays or is scrubbed, `reel.js` has three drawing workers (two on the
+  GPU, one on a CPU thread) draw the next frames at the screen's pixel size, every shape,
+  with the same renderer as the export, and shows them on a canvas over the graph. When
+  playback stops, the frame goes back to the graph, and the canvas is taken away only
+  once Desmos has drawn it. Playback is clocked: a late frame is skipped, never queued.
+  A clip can be played while it traces; playback starts once half a second is traced
+  and holds at the last traced frame if it catches up. Browsers without `OffscreenCanvas`
+  play through the graph itself, which then draws each frame's largest 600 shapes (300
+  on touch devices).
 
 ## Export
 
