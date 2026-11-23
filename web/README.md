@@ -21,11 +21,50 @@ the Desmos API and the mediabunny module from jsDelivr.
 
 ## Loading
 
-The first screen needs none of the heavy parts. Desmos (about 1 MB) is loaded after the
-page has painted, or as soon as a file is chosen if that comes first; mediabunny is a
-dynamic import, preloaded. The tracing workers' modules are preloaded too, and JS and CSS
-may be cached for five minutes (`vercel.json`), so a trace's workers all start from the
-browser cache instead of revalidating one after another.
+The first screen needs index.html, the three stylesheets, three fonts and app.js with its two
+imports, all from this origin and all preloaded; nothing heavy holds it up.
+
+- **mediabunny** is vendored: `vendor/mediabunny-1.65.2/mediabunny.min.mjs` is the npm
+  package's `dist/bundles/mediabunny.min.mjs`, byte for byte, with its MPL-2.0 licence beside
+  it. It comes over the page's own connection and is cached for a year (the version is in the
+  path). It is preloaded and imported dynamically, and nothing may import it statically: a
+  static import makes app.js, and so the file picker, wait for its 150 KB.
+- **Desmos** (about 1 MB, behind a redirect to the current v1.11.x) is the longest download
+  and a trace waits for it, so index.html preloads it at low priority from the start; app.js
+  runs it once the page and mediabunny are in, or as soon as a file is chosen. Its URL (with
+  the API key) is in both files and must match, or it is fetched twice.
+- The tracing workers' modules are preloaded too. `vercel.json` lets JS and CSS stay fresh
+  for five minutes, but in production that rarely holds: Vercel's CDN sends an `Age` header
+  (often hours), so the browser counts them stale on arrival and revalidates every use,
+  including each trace worker's three module imports, one after another.
+
+Everything after the first page load comes from `sw.js`, a service worker registered once the
+first visit has fetched Desmos (so installing it copies from the browser cache instead of
+downloading again). It keeps a whole copy of the app (every file in its `APP` list, fetched
+twice and kept only if both rounds agree), the fonts and mediabunny (`FIXED`, whose names never
+change), and the Desmos script, and serves pages and their workers from them without waiting
+on the network; it works offline too. Each page, and every worker it starts, stays on the copy
+it opened with. The first page is taken over as soon as the worker is installed, but only if
+every script and stylesheet it loaded is the same in the copy and no other page is open;
+otherwise it and its workers stay on the network. After each visit the worker compares the
+copy with the site, and if anything changed takes a new whole copy for the next visit: the
+first visit after a deploy still runs the previous version, never a mix of the two. A new file
+the app loads belongs in `APP` (left out, it still loads, from the network). To turn the
+worker off, set `OFF = true` in `sw.js` and deploy: each browser's next visit deletes its
+caches and unregisters it; the registration at the end of index.html can then go too.
+
+Measured in headless Chrome against the bench's Vercel-like server (Desmos from desmos.com),
+cold, with DevTools' network profiles and the CPU slowed 4x; medians of 2 to 4 runs:
+
+| | Fast 4G | Slow 4G |
+| --- | --- | --- |
+| first paint | 0.46 → 0.50 s | 1.48 → 1.50 s |
+| file picker works | 0.72 → 0.45 s | 2.51 → 1.72 s |
+| Desmos ready | 2.86 → 2.42 s | 10.2 → 8.7 s |
+| file chosen and Trace clicked at once: first traced frame | 3.0 → 2.6 s | 10.4 → 9.0 s |
+| Trace clicked once everything is in, production caching: click to first traced frame | 3.3 → 0.7 s | 10.8 → 0.6 s |
+| repeat visit: first paint | 0.22 → 0.07 s | 0.64 → 0.08 s |
+| repeat visit: Desmos ready | 0.61 → 0.42 s | 1.01 → 0.43 s |
 
 ## Pipeline
 
