@@ -265,7 +265,10 @@ async function trace() {
   };
   const next = { W, H, fps, style, frames: new Array(count), scenes: 1, key: settingsKey(), name: media.file.name };
   // every core but one, which is left for decoding and the page
-  const pool = new Pool(Math.max(2, Math.min(16, (navigator.hardwareConcurrency || 4) - 1)));
+  const pool = new Pool(Math.max(2, Math.min(16, (navigator.hardwareConcurrency || 4) - 1)), './frame-worker.js');
+  // frames go to the workers as GPU bitmaps where the browser can (see frame-worker.js)
+  const viaBitmap = typeof OffscreenCanvas !== 'undefined' && typeof createImageBitmap === 'function';
+  let stopReaders = () => {}, closeThumbs = () => {}, closeFrames = () => {};
   let shown = -1, lastPreview = 0;
 
   // Pass 1 (reader) and pass 2 (tracer) run at the same time. The reader decodes small
@@ -280,11 +283,23 @@ async function trace() {
   const failure = new Promise((_, rej) => (fail = rej));
   failure.catch(() => {});
   const waitRead = () => Promise.race([new Promise((r) => (wake = r)), failure]);
+  // a decoder that stops answering (the GPU's decoders are shared with every other tab) would
+  // otherwise leave tracing waiting forever; no frame read or traced for 30 s ends it instead
+  let lastTick = performance.now();
+  const tick = () => { lastTick = performance.now(); };
+  const watchdog = setInterval(() => {
+    if (performance.now() - lastTick > 30000) fail(new Error('the video decoder stopped responding. Close other tabs playing video and try again.'));
+  }, 2000);
 
   const reader = (async () => {
     const TW = 160, TH = even(160 * H / W);
-    const thumbSink = new CanvasSink(media.video, { poolSize: 1 });
+    const thumbSink = new CanvasSink(media.video, { width: TW, height: TH, fit: 'fill', poolSize: 1 });
     const readThumb = frameReader(TW, TH);
+    // thumbnails are read back in two small workers (a few in flight, taken in order), so the
+    // main thread never waits on the GPU; without OffscreenCanvas they are read here instead
+    const readers = viaBitmap ? new Pool(2, './frame-worker.js') : null;
+    stopReaders = () => readers && readers.terminate();
+    const ordered = [];
     const cutter = new SceneCutter();
     let cur = 0;
     const close = (s) => {
@@ -295,16 +310,28 @@ async function trace() {
         sceneReady(s).done();
       }, (e) => fail(e));
     };
-    for await (const wrapped of thumbSink.canvasesAtTimestamps(times)) {
-      if (stopping || abort) throw new Stop();
-      const px = readThumb(wrapped);
+    const take = (px) => {
       thumbs.push(px);
       const s = cutter.push(px);
       scene[read] = s;
       if (s !== cur) { close(cur); cur = s; }
       read++;
+      tick();
       if (wake) { const w = wake; wake = null; w(); }
+    };
+    const it = thumbSink.canvasesAtTimestamps(times)[Symbol.asyncIterator]();
+    closeThumbs = () => it.return && it.return().catch(() => {});
+    for (;;) {
+      const { value: wrapped, done: end } = await Promise.race([it.next(), failure]);
+      if (end) break;
+      if (stopping || abort) throw new Stop();
+      if (!readers) { take(readThumb(wrapped)); continue; }
+      const bitmap = await createImageBitmap(wrapped.canvas);
+      ordered.push(readers.run({ type: 'pixels', bitmap, w: TW, h: TH }, [bitmap]));
+      if (ordered.length >= 6) take((await ordered.shift()).rgba);
     }
+    while (ordered.length) take((await ordered.shift()).rgba);
+    if (readers) readers.terminate();
     close(cur);
     next.scenes = cur + 1;
     read = count;
@@ -318,19 +345,33 @@ async function trace() {
     $('frame-label').textContent = 'desmos';
     body.classList.remove('comparing');
     progress('reading frames', 0, count);
-    const sink = new CanvasSink(media.video, { poolSize: 1 });
+    const sink = new CanvasSink(media.video, { width: W, height: H, fit: 'fill', poolSize: 1 });
     const readFrame = frameReader(W, H);
     let i = 0, done = 0;
     const pending = new Set();
-    for await (const wrapped of sink.canvasesAtTimestamps(times)) {
+    const frames = sink.canvasesAtTimestamps(times)[Symbol.asyncIterator]();
+    closeFrames = () => frames.return && frames.return().catch(() => {});
+    for (;;) {
+      // raced against failure, so a stalled decoder can't hold the loop forever
+      const { value: wrapped, done: end } = await Promise.race([frames.next(), failure]);
+      if (end) break;
       if (stopping) throw new Stop();
       const id = i++;
       while (read <= id) await waitRead();
       await Promise.race([sceneReady(scene[id]), failure]);
-      const rgba = readFrame(wrapped);
-      const job = pool.run({ id, w: W, h: H, rgba, opts: { ...opts, scene: scene[id] } }, [rgba.buffer]).then((r) => {
+      let job;
+      const msg = { id, w: W, h: H, opts: { ...opts, scene: scene[id] } };
+      if (viaBitmap) {
+        msg.bitmap = await createImageBitmap(wrapped.canvas);
+        job = pool.run(msg, [msg.bitmap]);
+      } else {
+        msg.rgba = readFrame(wrapped);
+        job = pool.run(msg, [msg.rgba.buffer]);
+      }
+      job = job.then((r) => {
         next.frames[r.id] = { fill: r.fill, line: r.line, mean: r.mean };
         done++;
+        tick();
         pending.delete(job);
         progress('tracing', done, count);
         const now = performance.now();
@@ -354,25 +395,28 @@ async function trace() {
       showError(`tracing stopped: ${err.message || err}`);
     }
   } finally {
+    clearInterval(watchdog);
     abort = true;
+    closeFrames();
+    closeThumbs();
+    stopReaders();
     pool.terminate();
   }
 }
 
 class Stop extends Error {}
 
-// Frames come out of the decoder at native size and are scaled here, on a canvas that is
-// CPU-backed from the start (willReadFrequently). Scaling on the decoder's own canvas left it
-// to Chrome, which can move a canvas it sees read back often from GPU to CPU mid-run, and the
-// two scale differently: a trace could come out slightly different each time.
+// Frames are scaled on the GPU by the decoder's own canvas, then copied 1:1 into a canvas that
+// is CPU-backed from the start (willReadFrequently) and read from there. The decoder's canvas
+// is never read back itself: Chrome can quietly move a canvas it sees read often from GPU to
+// CPU mid-run, and the two scale differently, so reading it directly made traces vary from
+// run to run. Scaling first also keeps the GPU readback to the target size.
 function frameReader(w, h) {
   const c = document.createElement('canvas');
   c.width = w; c.height = h;
   const ctx = c.getContext('2d', { willReadFrequently: true });
-  ctx.imageSmoothingEnabled = true;
-  ctx.imageSmoothingQuality = 'medium';
   return (wrapped) => {
-    ctx.drawImage(wrapped.canvas, 0, 0, w, h);
+    ctx.drawImage(wrapped.canvas, 0, 0);
     return ctx.getImageData(0, 0, w, h).data;
   };
 }
