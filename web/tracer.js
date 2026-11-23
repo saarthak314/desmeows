@@ -1,11 +1,16 @@
 // Frame tracer, run as a module Web Worker. One message in per frame, one out.
 //
-//   paint: quantise to the clip's palette, clean speckle, split into 4-connected regions,
-//          merge regions under minArea, trace each region's outer boundary exactly (pixel
-//          cracks), simplify, colour it with the region's true mean colour. Drawn largest
-//          enclosing area first, so a region's holes are painted by what sits inside them.
-//   lines: per-channel Lab Canny, thinned to 1px, walked into centerlines, simplified,
-//          coloured from the bright side (line art) or the dark side (ink over paint).
+//   paint: quantise to the scene's palette (or take the stabiliser's labels), clean speckle,
+//          split into 4-connected regions, merge regions under minArea, trace each region's
+//          outer boundary exactly (pixel cracks), simplify, colour it with the region's median
+//          colour. Drawn largest enclosing area first, so a region's holes are painted by what
+//          sits inside them.
+//   lines: per-channel Lab Canny, thinned to 1px, walked into centerlines, simplified in
+//          fixed cells, coloured from the bright side (line art) or the dark side (ink over
+//          paint).
+//
+// In the app every frame has been through the stabiliser (stabilise.js) first, so the parts
+// of the picture that are still arrive here exactly as they did last frame.
 //
 // Output per layer: verts Int16Array (x, y pairs, y up, in half trace pixels), counts
 // Uint32Array (vertices per shape), rgb Uint8Array (3 per shape).
@@ -27,11 +32,11 @@ export function setPalettes(luts) { LUTS = luts; }
 export function handle(data) {
   if (data.type === 'palettes') { LUTS = data.luts; lastTransfer = []; return { type: 'ready' }; }
   if (data.type === 'kmeans') {
-    const lut = buildLUT(kmeans(data.samples, data.k, data.iters));
-    lastTransfer = [lut.buffer];
-    return { lut };
+    const centres = kmeans(data.samples, data.k, data.iters), lut = buildLUT(centres);
+    lastTransfer = [lut.buffer, centres.buffer];
+    return { lut, centres };
   }
-  const { id, w, h, rgba, opts } = data;
+  const { id, w, h, rgba, opts, labels } = data;
   const res = { id };
   const transfer = [];
   const keep = (name, layer) => {
@@ -40,7 +45,7 @@ export function handle(data) {
     transfer.push(layer.verts.buffer, layer.counts.buffer, layer.rgb.buffer);
   };
   if (opts.style === 'paint') {
-    keep('fill', paint(rgba, w, h, opts));
+    keep('fill', paint(rgba, w, h, opts, labels));
     if (opts.ink) keep('line', lines(rgba, w, h, opts, true));
   } else {
     keep('line', lines(rgba, w, h, opts, false));
@@ -101,6 +106,25 @@ function rdp(P, n, eps, closed, keep) {
   if (n - far >= 2) rdpSeg(P, far, n, e2, keep, RDP_STACK);
 }
 
+// Douglas–Peucker between anchors: the ends, and wherever the path steps from one G x G cell
+// into another (the point in the higher-numbered cell, so either walking direction agrees).
+// What a stretch simplifies to then depends only on the points between its two anchors.
+function rdpAnchored(P, n, eps, keep, G) {
+  if (n < 3) { for (let k = 0; k < n; k++) keep[k] = 1; return; }
+  const e2 = eps * eps;
+  if (RDP_STACK.length < 2 * n + 4) RDP_STACK = new Int32Array(2 * n + 4);
+  keep[0] = keep[n - 1] = 1;
+  let last = 0, pc = Math.floor(P[1] / G) * 65536 + Math.floor(P[0] / G);
+  for (let k = 1; k < n; k++) {
+    const c = Math.floor(P[2 * k + 1] / G) * 65536 + Math.floor(P[2 * k] / G);
+    if (c === pc) continue;
+    const at = c > pc ? k : k - 1;
+    pc = c;
+    if (at > last) { keep[at] = 1; rdpSeg(P, last, at, e2, keep, RDP_STACK); last = at; }
+  }
+  rdpSeg(P, last, n - 1, e2, keep, RDP_STACK);
+}
+
 // Points sit on the half-pixel grid (whole pixels for lines). While the squared length L is
 // under RDP_EXACT_L (2^48 over the frame's squared diagonal), squared cross products are exact
 // multiples of 1/16, too far apart for two different ones to round to the same quotient by L:
@@ -144,15 +168,18 @@ function rdpSeg(P, i0, j0, e2, keep, stack) {
 
 // ---------------------------------------------------------------- paint
 
-function paint(rgba, w, h, o) {
+function paint(rgba, w, h, o, labels) {
   const n = w * h;
   RDP_EXACT_L = 2 ** 48 / (w * w + h * h);
-  const LUT = LUTS[o.scene || 0];
   const px = new Int32Array(rgba.buffer, rgba.byteOffset, n);
   let lab = scratch('pLab', Uint8Array, n), alt = scratch('pLab2', Uint8Array, n);
-  for (let i = 0; i < n; i++) {
-    const v = px[i]; // little-endian RGBA: 5-bit r, g, b into a 15-bit index
-    lab[i] = LUT[((v & 0xf8) << 7) | ((v >> 6) & 0x3e0) | ((v >> 19) & 0x1f)];
+  if (labels) lab = labels;
+  else {
+    const LUT = LUTS[o.scene || 0];
+    for (let i = 0; i < n; i++) {
+      const v = px[i]; // little-endian RGBA: 5-bit r, g, b into a 15-bit index
+      lab[i] = LUT[((v & 0xf8) << 7) | ((v >> 6) & 0x3e0) | ((v >> 19) & 0x1f)];
+    }
   }
   for (let pass = 0; pass < o.smooth; pass++) { modeFilter(lab, alt, w, h); const t = lab; lab = alt; alt = t; }
 
@@ -257,15 +284,17 @@ function paint(rgba, w, h, o) {
     }
   }
 
-  // Final labels, compacted, with exact mean colour and first (top-left) pixel. Labels go in a
-  // frame padded by one pixel of -1 so the boundary walk needs no bounds checks.
+  // Final labels, compacted, with first (top-left) pixel. Labels go in a frame padded by one
+  // pixel of -1 so the boundary walk needs no bounds checks. Each region's pixel values are
+  // gathered together (vals[from[f]..at[root]]), for its colour.
   const W2 = w + 2, LP = scratch('pLabels', Int32Array, W2 * (h + 2));
   LP.fill(-1, 0, W2); LP.fill(-1, (h + 1) * W2, (h + 2) * W2);
   for (let y = 1; y <= h; y++) { LP[y * W2] = -1; LP[y * W2 + w + 1] = -1; }
   const id = scratch('pId', Int32Array, nc);
   id.fill(-1, 0, nc);
-  const first = scratch('pFirst', Int32Array, nc), npx = scratch('pPixels', Int32Array, nc);
-  const sr = scratch('pSumR', Float64Array, nc), sg = scratch('pSumG', Float64Array, nc), sb = scratch('pSumB', Float64Array, nc);
+  const first = scratch('pFirst', Int32Array, nc), from = scratch('pFrom', Int32Array, nc), root = scratch('pRoot', Int32Array, nc);
+  const at = scratch('pValAt', Int32Array, nc), vals = scratch('pVals', Int32Array, n);
+  for (let c = 0, s = 0; c < nc; c++) if (parent[c] === c) { at[c] = s; s += size[c]; }
   let m = 0;
   for (let y = 0, r = 0; y < h; y++) {
     const lo = (y + 1) * W2 + 1 - y * w;
@@ -274,12 +303,16 @@ function paint(rgba, w, h, o) {
       while (parent[c] !== c) c = parent[c];
       let f = id[c];
       const p0 = rx[r], p1 = rx[r + 1];
-      if (f === -1) { f = id[c] = m++; first[f] = p0; npx[f] = 0; sr[f] = 0; sg[f] = 0; sb[f] = 0; }
-      let R = 0, G = 0, B = 0;
-      for (let p = p0; p < p1; p++) { LP[p + lo] = f; const v = px[p]; R += v & 255; G += (v >> 8) & 255; B += (v >> 16) & 255; }
-      npx[f] += p1 - p0; sr[f] += R; sg[f] += G; sb[f] += B;
+      if (f === -1) { f = id[c] = m++; first[f] = p0; from[f] = at[c]; root[f] = c; }
+      let k = at[c];
+      for (let p = p0; p < p1; p++) { LP[p + lo] = f; vals[k++] = px[p]; }
+      at[c] = k;
     }
   }
+  // Each region's colour is the median of its pixels, channel by channel: true to what it
+  // covers, and steady while a few pixels at its edge come and go.
+  const col = scratch('pColour', Uint8Array, 3 * m);
+  for (let f = 0; f < m; f++) median3(vals, from[f], at[root[f]], col, 3 * f);
 
   // Trace, simplify and keep each region; simplified loops pile up in one buffer.
   let pool = scratch('pPool', Float64Array, 1 << 16), used = 0;
@@ -317,12 +350,40 @@ function paint(rgba, w, h, o) {
     order.sort((s, t) => shapeArea[t] - shapeArea[s] || s - t);
   }
   for (const s of order) {
-    const f = shapeF[s], cnt = npx[f], a = shapeAt[s], e = shapeAt[s + 1];
+    const f = shapeF[s], a = shapeAt[s], e = shapeAt[s + 1];
     const pts = new Array(e - a);
     for (let k = a; k < e; k += 2) { pts[k - a] = pool[k]; pts[k - a + 1] = h - pool[k + 1]; }
-    out.push(pts, Math.round(sr[f] / cnt), Math.round(sg[f] / cnt), Math.round(sb[f] / cnt));
+    out.push(pts, col[3 * f], col[3 * f + 1], col[3 * f + 2]);
   }
   return out.done();
+}
+
+// Per-channel medians (the lower middle value) of packed RGBA values V[b..e), into out[o..o+3):
+// each channel counted over just the span of values it has (a region's values sit close).
+const MED_HIST = new Int32Array(768);
+function median3(V, b, e, out, o) {
+  const r = (e - b - 1) >> 1;
+  let r0 = 255, r1 = 0, g0 = 255, g1 = 0, b0 = 255, b1 = 0;
+  for (let i = b; i < e; i++) {
+    const v = V[i], R = v & 255, G = (v >> 8) & 255, B = (v >> 16) & 255;
+    if (R < r0) r0 = R; if (R > r1) r1 = R;
+    if (G < g0) g0 = G; if (G > g1) g1 = G;
+    if (B < b0) b0 = B; if (B > b1) b1 = B;
+  }
+  const H = MED_HIST;
+  for (let i = b; i < e; i++) { const v = V[i]; H[(v & 255) - r0]++; H[256 + ((v >> 8) & 255) - g0]++; H[512 + ((v >> 16) & 255) - b0]++; }
+  out[o] = r0 + rankIn(H, 0, r1 - r0, r);
+  out[o + 1] = g0 + rankIn(H, 256, g1 - g0, r);
+  out[o + 2] = b0 + rankIn(H, 512, b1 - b0, r);
+}
+// the bin holding rank r among H[a..a+span], clearing the bins as it goes
+function rankIn(H, a, span, r) {
+  let cum = 0, at = -1;
+  for (let i = 0; i <= span; i++) {
+    cum += H[a + i]; H[a + i] = 0;
+    if (at < 0 && cum > r) at = i;
+  }
+  return at;
 }
 
 // 3x3 majority: keep the centre unless a strict majority (5 of 9) is another label. The window
@@ -434,7 +495,7 @@ function lines(rgba, w, h, o, ink) {
     if (PATH.length < e - a + 2) PATH = new Float64Array(2 * (e - a) + 2);
     const P = PATH, keep = keepFor(cnt + 1);
     for (let k = a; k < e; k++) P[k - a] = PP[k];
-    rdp(P, cnt, o.lineEpsilon, false, keep);
+    rdpAnchored(P, cnt, o.lineEpsilon, keep, LINE_CELL);
     let kept = 0;
     for (let k = 0; k < cnt; k++) kept += keep[k];
     const col = kept < 2 ? null : sideColor(rgba, w, h, PP, a, e, ink);
@@ -459,6 +520,9 @@ function lines(rgba, w, h, o, ink) {
 }
 
 let PATH = new Float64Array(1024);
+// Lines are simplified 16 px cell by cell, so a change at one end of a long line (a moving
+// part, a junction that splits differently) doesn't move the vertices along all of it.
+const LINE_CELL = 16;
 const DIAG = Math.hypot(1, 1);
 // Path steps are unit moves to one of the 8 neighbours.
 function pathLength(PP, a, e) {
