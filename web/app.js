@@ -1,5 +1,6 @@
 import { SceneCutter, sceneSamples } from './palette.js';
 import { slotState, frameExprs, widthExprs, packLayer, Painter, rasterize, bounds } from './render.js';
+import { Reel } from './reel.js';
 
 // ---------------------------------------------------------------- dependencies
 
@@ -384,7 +385,15 @@ async function trace() {
 
   try {
     clip = next;
+    tracedPrefix = 0;
+    current = -1;
+    body.classList.remove('reeling');
     await Promise.race([ensureCalc(W, H, style), failure]);
+    if (reel) reel.setup(clip);
+    // the clip can be played while it traces: playback holds at the last frame traced so far
+    $('scrub').max = count - 1; $('scrub').value = 0; $('scrub').disabled = false;
+    $('play').disabled = false;
+    let autoplay = !!reel;
     $('frame-label').textContent = 'desmos';
     body.classList.remove('comparing');
     progress('reading frames', 0, count);
@@ -417,8 +426,11 @@ async function trace() {
         tick();
         pending.delete(job);
         progress('tracing', done, count);
+        while (tracedPrefix < count && next.frames[tracedPrefix]) tracedPrefix++;
+        // once half a second of the clip is traced, start playing it; tracing stays ahead
+        if (autoplay && tracedPrefix >= Math.min(count, Math.ceil(fps / 2))) { autoplay = false; if (!playing) setPlaying(true); }
         const now = performance.now();
-        if (r.id > shown && now - lastPreview > 250) { shown = r.id; lastPreview = now; drawFrame(r.id, LIVE_CAP); }
+        if (!playing && r.id > shown && now - lastPreview > 250) { shown = r.id; lastPreview = now; if (reel) showFrame(r.id); else drawFrame(r.id, LIVE_CAP); }
       });
       pending.add(job);
       while (pool.inFlight >= pool.size * 2) await Promise.race([...pending, failure]);
@@ -477,6 +489,7 @@ function setSettingsDisabled(on) {
 
 function resetAfterTrace() {
   setState(clip ? 'ready' : 'loaded');
+  if (!clip) { setPlaying(false, false); $('play').disabled = true; $('scrub').disabled = true; body.classList.remove('reeling'); }
   $('trace').hidden = false; $('stop').hidden = true; $('progress').hidden = true;
   setSettingsDisabled(false);
   markStale();
@@ -502,7 +515,8 @@ function finishTrace(partial = false) {
   body.classList.remove('comparing');
   $('scrub').max = f.length - 1; $('scrub').disabled = false;
   $('play').disabled = false; $('compare').disabled = false;
-  drawFrame(0);
+  if (current < 0 || current >= f.length) current = 0;
+  if (!playing) { if (reel) showFrame(current); settle(); }
 }
 
 // ---------------------------------------------------------------- live graph
@@ -528,7 +542,10 @@ async function ensureCalc(W, H, style) {
     const Desmos = await desmos();
     calc = Desmos.GraphingCalculator($('calc'), { ...CALC_OPTIONS, backgroundColor: colorToken('--color-paper') });
     painter = new Painter(calc);
-    new ResizeObserver(() => applyWidths()).observe($('calc'));
+    new ResizeObserver(() => {
+      applyWidths();
+      if (reel && clip) { reel.setup(clip); if (body.classList.contains('reeling') && current >= 0) showFrame(current); }
+    }).observe($('calc'));
   }
   const key = `${W}x${H}|${style}`;
   if (key !== calcKey) {
@@ -551,6 +568,7 @@ function applyWidths() {
 // phones get a lighter live cut; their graphics budget is smaller
 const LIVE_CAP = matchMedia('(pointer: coarse)').matches ? 300 : 600;
 
+// The graph draws frame i (capped while playing, in browsers without the reel).
 function drawFrame(i, cap = Infinity) {
   const fr = clip?.frames[i];
   if (!fr) return;
@@ -559,12 +577,45 @@ function drawFrame(i, cap = Infinity) {
   painter.draw(fr, clip.style, cap);
   drawCost = performance.now() - t;
   rendered++;
-  if (body.dataset.state !== 'tracing') {
-    $('scrub').value = i;
-    $('time').textContent = `${fmtTime(i / clip.fps)} / ${fmtTime(clip.frames.length / clip.fps)}`;
-  }
+  updateClock(i);
   if (body.classList.contains('comparing') && body.dataset.state !== 'tracing') showSource(media.start + i / clip.fps, i);
 }
+
+function updateClock(i) {
+  $('scrub').value = i;
+  $('time').textContent = `${fmtTime(i / clip.fps)} / ${fmtTime(clip.frames.length / clip.fps)}`;
+}
+
+// Frame i on screen through the reel (playing, scrubbing, stepping); the graph catches up
+// with settle() once things stop moving.
+const reel = Reel.supported() ? new Reel($('reel')) : null;
+let tracedPrefix = 0;
+let settleToken = 0, settleTimer = 0;
+
+function showFrame(i) {
+  if (!clip || !clip.frames[i]) return;
+  if (!reel) { drawFrame(i, playing ? LIVE_CAP : Infinity); return; }
+  settleToken++;
+  current = i;
+  body.classList.add('reeling');
+  reel.show(i);
+  reel.prefetch(i, clip.frames.length);
+  updateClock(i);
+  if (body.classList.contains('comparing') && body.dataset.state !== 'tracing') showSource(media.start + i / clip.fps, i);
+}
+
+// Hand the paused frame to the graph, and take the reel away only once Desmos has drawn it
+// (a 2x2 screenshot resolves after evaluation), so the swap never shows a half-drawn graph.
+async function settle() {
+  clearTimeout(settleTimer);
+  if (!clip || current < 0 || !clip.frames[current]) return;
+  const token = ++settleToken;
+  drawFrame(current);
+  if (!reel || !calc) return;
+  await new Promise((r) => calc.asyncScreenshot({ width: 2, height: 2, targetPixelRatio: 1, showLabels: false, mathBounds: bounds(clip.W, clip.H) }, () => requestAnimationFrame(() => requestAnimationFrame(r))));
+  if (token === settleToken && !playing) body.classList.remove('reeling');
+}
+const settleSoon = () => { clearTimeout(settleTimer); settleTimer = setTimeout(settle, 150); };
 
 // Playback is clocked: a frame that is late is skipped, never queued, so heavy traces drop
 // frames instead of slowing down.
@@ -576,7 +627,7 @@ function setPlaying(on, redraw = true) {
   body.classList.toggle('playing', playing);
   $('play').setAttribute('aria-label', playing ? 'Pause' : 'Play');
   cancelAnimationFrame(raf);
-  if (!playing && wasPlaying && redraw && current >= 0) drawFrame(current);
+  if (!playing && wasPlaying && redraw && current >= 0) settle();
   if (playing) {
     t0 = rateT = performance.now(); f0 = Math.max(0, current); rendered = 0;
     raf = requestAnimationFrame(loop);
@@ -585,7 +636,19 @@ function setPlaying(on, redraw = true) {
 
 function loop(now) {
   const n = clip.frames.length;
-  const target = (f0 + Math.floor((now - t0) / 1000 * clip.fps)) % n;
+  const limit = body.dataset.state === 'tracing' ? tracedPrefix : n;
+  let target = f0 + Math.floor((now - t0) / 1000 * clip.fps);
+  if (limit < n && target >= limit) {
+    // caught up with the trace: hold the last traced frame and let the clock wait
+    target = Math.max(0, limit - 1);
+    t0 = now - (target - f0) * 1000 / clip.fps;
+  }
+  target %= n;
+  if (reel) {
+    if (target !== current || reel.shown !== target) showFrame(target);
+    raf = requestAnimationFrame(loop);
+    return;
+  }
   if (target !== current) drawFrame(target, LIVE_CAP);
   if (now - rateT > 1500) {
     liveFps = rendered * 1000 / (now - rateT);
@@ -599,7 +662,13 @@ function loop(now) {
 }
 
 $('play').addEventListener('click', () => setPlaying(!playing));
-$('scrub').addEventListener('input', (e) => { const i = +e.target.value; setPlaying(false, false); drawFrame(i); });
+$('scrub').addEventListener('input', (e) => {
+  const i = Math.min(+e.target.value, Math.max(0, (body.dataset.state === 'tracing' ? tracedPrefix : clip.frames.length) - 1));
+  setPlaying(false, false);
+  showFrame(i);
+  if (reel) settleSoon();
+});
+$('scrub').addEventListener('change', () => { if (reel && !playing) settle(); });
 
 // Hold to compare: the source frame over the graph, for as long as it is held.
 function comparing(on) {
@@ -616,11 +685,11 @@ for (const ev of ['pointerup', 'pointerleave', 'pointercancel']) $('compare').ad
 
 addEventListener('keydown', (e) => {
   const t = e.target instanceof Element ? e.target : body;
-  if (!clip || body.dataset.state !== 'ready' || t.matches('input:not([type=range]), textarea')) return;
+  if (!clip || (body.dataset.state !== 'ready' && body.dataset.state !== 'tracing') || t.matches('input:not([type=range]), textarea')) return;
   if (e.key === ' ' && !t.matches('button')) { e.preventDefault(); setPlaying(!playing); }
   else if ((e.key === 'c' || e.key === 'C') && !e.repeat) comparing(true);
-  else if (e.key === 'ArrowRight' && t.id !== 'scrub') { setPlaying(false, false); drawFrame(Math.min(clip.frames.length - 1, current + 1)); }
-  else if (e.key === 'ArrowLeft' && t.id !== 'scrub') { setPlaying(false, false); drawFrame(Math.max(0, current - 1)); }
+  else if (e.key === 'ArrowRight' && t.id !== 'scrub') { setPlaying(false, false); showFrame(Math.min(clip.frames.length - 1, current + 1)); if (reel) settleSoon(); }
+  else if (e.key === 'ArrowLeft' && t.id !== 'scrub') { setPlaying(false, false); showFrame(Math.max(0, current - 1)); if (reel) settleSoon(); }
 });
 addEventListener('keyup', (e) => { if (e.key === 'c' || e.key === 'C') comparing(false); });
 

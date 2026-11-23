@@ -8,6 +8,9 @@
 // second, while CPU workers scale with cores. Either way the frame is converted to YUV here:
 // an encoder fed RGB frames from memory writes full-range video, which some players show
 // washed out, and one fed a mix of GPU and memory frames restarts with new settings mid-stream.
+//
+// Live playback (reel.js) uses the same worker with `bitmaps` set: frames come back as
+// ImageBitmaps at the screen's size, to be shown as they are.
 import { rasterize } from './render.js';
 
 let ctx = null, mem = null, job = null, pixels = null;
@@ -21,20 +24,21 @@ self.onmessage = ({ data }) => { draw(data).catch((err) => setTimeout(() => { th
 
 async function draw(data) {
   if (data.type === 'init') {
-    // { W, H, style, outW, outH, fps, cpu, credit: { light, dark, x, y } | null }
+    // { W, H, style, outW, outH, fps, cpu, credit: { light, dark, x, y } | null, bitmaps }
     job = data;
+    job.asBitmaps = !!job.bitmaps || !asFrames;
     ctx = new OffscreenCanvas(job.outW, job.outH).getContext('2d', { alpha: false, willReadFrequently: job.cpu });
     // GPU frames are read back through a CPU canvas: reading a GPU canvas directly every frame
     // makes Chrome move it to the CPU for good
-    mem = job.cpu || !asFrames ? ctx : new OffscreenCanvas(job.outW, job.outH).getContext('2d', { alpha: false, willReadFrequently: true });
-    self.postMessage({ frames: asFrames });
+    mem = job.cpu || job.asBitmaps ? ctx : new OffscreenCanvas(job.outW, job.outH).getContext('2d', { alpha: false, willReadFrequently: true });
+    self.postMessage({ frames: !job.asBitmaps });
     return;
   }
   const { i, frame, bright } = data;
   const { outW, outH, credit } = job;
   rasterize(ctx, frame, job.style, job.W, job.H, outW / job.W);
   if (credit) ctx.drawImage(bright ? credit.dark : credit.light, credit.x, credit.y);
-  if (!asFrames) {
+  if (job.asBitmaps) {
     const bitmap = ctx.canvas.transferToImageBitmap();
     self.postMessage({ i, bitmap }, [bitmap]);
     return;

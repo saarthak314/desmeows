@@ -85,13 +85,16 @@ body:not([data-state="empty"]) .drop { display: none; }
 .frame-label--right { right: 1.5ch; color: var(--color-muted); }
 body.comparing .frame-label--left { color: var(--color-warm); }
 
-.calc, .source {
+.calc, .source, .reel {
   grid-area: 1 / 1;
   width: min(100%, calc(var(--frame-h, 100%) * var(--aspect, 1.7778)));
   aspect-ratio: var(--aspect, 1.7778);
   max-height: 100%;
 }
 .source { opacity: 0; z-index: var(--z-base); pointer-events: none; }
+/* playback frames, drawn ahead by workers (reel.js), over the graph while things move */
+.reel { visibility: hidden; pointer-events: none; }
+body.reeling .reel { visibility: visible; }
 
 /* where the export's credit will sit, at the same size relative to the picture */
 .credit-box {
@@ -246,7 +249,7 @@ body[data-style="lines"] #ink-row { display: none; }
   .frame { flex: none; padding: var(--space-sm) var(--space-xs) var(--space-xs); }
   /* the picture takes the full width, but a tall (portrait) video stops at about a third of
      the screen's height, so the pinned stage leaves room for the settings */
-  .calc, .source, .credit-box { width: min(100%, calc(34svh * var(--aspect, 1.7778))); max-height: none; }
+  .calc, .source, .reel, .credit-box { width: min(100%, calc(34svh * var(--aspect, 1.7778))); max-height: none; }
   .screen {
     padding: var(--space-md) max(var(--gutter), env(safe-area-inset-right)) var(--space-sm) max(var(--gutter), env(safe-area-inset-left));
   }
