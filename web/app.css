@@ -100,7 +100,7 @@ body.comparing .frame-label--left { color: var(--color-warm); }
   aspect-ratio: var(--aspect, 1.7778); max-height: 100%;
   container-type: size; display: none;
 }
-body.credited:is([data-state="ready"], [data-state="exporting"]):not(.comparing) .credit-box { display: block; }
+body:is([data-state="ready"], [data-state="exporting"]):not(.comparing) .credit-box { display: block; }
 .credit-mark {
   position: absolute; right: 3cqh; bottom: 3cqh;
   font: 400 3.4cqh/1 var(--font-display); color: var(--color-ink); opacity: 0.8;

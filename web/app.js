@@ -72,7 +72,6 @@ const settings = {
   fps: ['source', '24', '12'].includes(params.get('fps')) ? params.get('fps') : 'source',
   ink: params.get('ink') !== 'off',
   size: params.get('size') || '',
-  credit: params.get('credit') !== 'off',
   renderer: params.get('renderer') === 'desmos' ? 'desmos' : 'direct',
 };
 
@@ -82,13 +81,11 @@ function syncSettingsUI() {
     if (input) input.checked = true;
   }
   $('ink').checked = settings.ink;
-  $('credit').checked = settings.credit;
   const rin = document.querySelector(`input[name="renderer"][value="${settings.renderer}"]`);
   if (rin) rin.checked = true;
   $('renderer-note').textContent = settings.renderer === 'direct'
     ? 'the same polygons desmos is given, drawn straight by your gpu. several times faster.'
     : 'every frame drawn and screenshotted by the desmos calculator itself.';
-  body.classList.toggle('credited', settings.credit);
   body.dataset.style = settings.style;
   $('fidelity-note').textContent = media ? TIER_NOTE[settings.style][settings.fidelity](traceWidth()) : '';
   const q = new URLSearchParams();
@@ -97,7 +94,6 @@ function syncSettingsUI() {
   if (settings.fps !== 'source') q.set('fps', settings.fps);
   if (!settings.ink) q.set('ink', 'off');
   if (settings.size) q.set('size', settings.size);
-  if (!settings.credit) q.set('credit', 'off');
   if (settings.renderer !== 'direct') q.set('renderer', settings.renderer);
   history.replaceState(null, '', q.size ? `?${q}` : location.pathname);
   markStale();
@@ -108,7 +104,6 @@ document.addEventListener('change', (e) => {
   if (t.name === 'style' || t.name === 'fidelity' || t.name === 'fps') settings[t.name] = t.value;
   else if (t.id === 'ink') settings.ink = t.checked;
   else if (t.name === 'size') { settings.size = t.value; syncSettingsUI(); return; }
-  else if (t.id === 'credit') { settings.credit = t.checked; syncSettingsUI(); return; }
   else if (t.name === 'renderer') { settings.renderer = t.value; syncSettingsUI(); return; }
   else return;
   syncSettingsUI();
@@ -775,7 +770,7 @@ async function exportMp4() {
     exportCalc.setExpressions(widthExprs(style, W, 1));
   }
 
-  const credit = settings.credit ? await creditStamp(outW, outH) : null;
+  const credit = await creditStamp(outW, outH); // every export carries the credit
   // Direct export draws and stamps frames in parallel workers, a few ahead of the encoder, and
   // takes them back in order. Workers with WebCodecs hand back NV12 VideoFrames that go to the
   // encoder untouched; otherwise bitmaps, which go through a canvas here.
@@ -938,11 +933,11 @@ async function savePage() {
     frames: clip.frames.map((f) => ({ f: packLayer(f.fill), l: packLayer(f.line), m: f.mean })),
   };
   const title = `${baseName()} in Desmos`;
-  const html = standalonePage(title, JSON.stringify(data), renderSrc, settings.credit);
+  const html = standalonePage(title, JSON.stringify(data), renderSrc);
   offerDownload(new Blob([html], { type: 'text/html' }), `${baseName()}-desmos.html`);
 }
 
-function standalonePage(title, json, renderSrc, credit) {
+function standalonePage(title, json, renderSrc) {
   const esc = (s) => s.replace(/</g, '\\u003c');
   return `<!doctype html>
 <html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
@@ -963,7 +958,7 @@ button:focus-visible, input:focus-visible { outline: 2px solid var(--accent); ou
 span { color: var(--muted); font-variant-numeric: tabular-nums; }
 </style></head>
 <body>
-<div id="stage"><div id="frame"><div id="calc"></div>${credit ? '<p id="credit">desmeows</p>' : ''}</div></div>
+<div id="stage"><div id="frame"><div id="calc"></div><p id="credit">desmeows</p></div></div>
 <div id="bar"><button id="play" type="button">pause</button><input id="seek" type="range" min="0" value="0" aria-label="Frame"><span id="t"></span></div>
 <script>
 ${renderSrc}

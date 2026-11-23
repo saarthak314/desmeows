@@ -100,7 +100,8 @@ offers 720p to 4K, whichever the browser can encode. Two renderers, chosen under
 
 Frames are encoded to H.264 through WebCodecs at about 0.16 bits per pixel, the
 source's audio packets are copied across without re-encoding, and mediabunny writes the
-mp4. The bottom-right "desmeows" credit switches to dark ink over bright corners.
+mp4. Every export and saved page carries the "desmeows" credit, bottom right, which
+switches to dark ink over bright corners.
 
 *Save as page* writes a single HTML file: the traced frames as stored,
 `render.js` inlined, and a small player.
@@ -108,8 +109,8 @@ mp4. The bottom-right "desmeows" credit switches to dark ink over bright corners
 ## Settings in the URL
 
 `style` (`paint`, `lines`), `fidelity` (`draft`, `fine`, `max`, `limit`), `fps`
-(`source`, `24`, `12`), `ink=off`, `size` (`720p` … `4K`), `renderer=desmos`,
-`credit=off`. The defaults are left out. `debug` exposes the app's state on
+(`source`, `24`, `12`), `ink=off`, `size` (`720p` … `4K`), `renderer=desmos`. The
+defaults are left out. `debug` exposes the app's state on
 `window.__desmeows`, for benchmarking.
 
 | Fidelity | Trace width | Colours a scene | Smallest region | Simplify (px) |
