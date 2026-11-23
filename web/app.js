@@ -6,19 +6,23 @@ import { Reel } from './reel.js';
 
 // Neither is needed to show the first screen, so neither holds it up. mediabunny reads and
 // writes the video: index.html preloads it, and load() waits for it (a failed module import
-// stays failed, so that takes a reload). Desmos is about 1 MB of script: it is fetched once
-// the page and mediabunny are in, or as soon as a file is chosen if that is sooner, awaited
-// before the first calculator is made, and fetched again by the next trace if it failed.
+// stays failed, so that takes a reload). Desmos is about 1 MB of script: index.html starts
+// fetching it at low priority, it is run once the page and mediabunny are in, or as soon as a
+// file is chosen if that is sooner, awaited before the first calculator is made, and fetched
+// again by the next trace if it failed.
 let Input, ALL_FORMATS, BlobSource, CanvasSink, Output, Mp4OutputFormat, BufferTarget,
-  CanvasSource, EncodedPacketSink, EncodedAudioPacketSource, canEncodeVideo;
-const mediabunny = import('https://cdn.jsdelivr.net/npm/mediabunny@1.65.2/dist/bundles/mediabunny.min.mjs').then((m) => {
+  CanvasSource, EncodedPacketSink, EncodedAudioPacketSource, canEncodeVideo, VideoSampleSource, VideoSample;
+// vendored byte for byte from the npm package (vendor/mediabunny-1.65.2/LICENSE), so it comes
+// over the page's own connection; nothing may import it statically, or app.js waits for it
+const mediabunny = import('./vendor/mediabunny-1.65.2/mediabunny.min.mjs').then((m) => {
   ({ Input, ALL_FORMATS, BlobSource, CanvasSink, Output, Mp4OutputFormat, BufferTarget,
-    CanvasSource, EncodedPacketSink, EncodedAudioPacketSource, canEncodeVideo } = m);
+    CanvasSource, EncodedPacketSink, EncodedAudioPacketSource, canEncodeVideo, VideoSampleSource, VideoSample } = m);
 });
 mediabunny.catch(() => {}); // reported by load()
 
 // The key is the public demo key from the Desmos API docs: fine for running this locally,
-// replace it with your own (desmos.com/api) before putting the page online.
+// replace it with your own (desmos.com/api) before putting the page online, here and in
+// index.html's preload.
 const DESMOS_API = 'https://www.desmos.com/api/v1.11/calculator.js?apiKey=dcb31709b452b1cf9dc26972add0fda6';
 let desmosLoad = null;
 function desmos() {
@@ -700,9 +704,6 @@ function layoutFrame() {
 new ResizeObserver(layoutFrame).observe($('frame'));
 
 // ---------------------------------------------------------------- export
-
-// imported here, beside the export code that uses them
-import { VideoSampleSource, VideoSample } from 'https://cdn.jsdelivr.net/npm/mediabunny@1.65.2/dist/bundles/mediabunny.min.mjs';
 
 // The graph is vector, so it can be drawn larger than the source.
 async function buildSizes() {

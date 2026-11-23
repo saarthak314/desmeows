@@ -22,13 +22,16 @@
 <!-- app.js's own imports, and mediabunny, which it awaits only once a file is chosen -->
 <link rel="modulepreload" href="render.js">
 <link rel="modulepreload" href="palette.js">
-<link rel="modulepreload" href="https://cdn.jsdelivr.net/npm/mediabunny@1.65.2/dist/bundles/mediabunny.min.mjs">
-<!-- the tracing workers' module, fetched now so a trace's workers all find it in the HTTP
-     cache (vercel.json lets it stay fresh for a few minutes) -->
+<link rel="modulepreload" href="vendor/mediabunny-1.65.2/mediabunny.min.mjs">
+<!-- the tracing workers' module, fetched now so a trace's workers find it in the HTTP cache
+     (in production they revalidate it, as Vercel's Age header leaves it stale; sw.js serves it
+     once installed) -->
 <link rel="modulepreload" href="frame-worker.js" fetchpriority="low">
 <link rel="modulepreload" href="tracer.js" fetchpriority="low">
-<!-- Desmos is loaded by app.js once the page is up; warm the connection for it -->
-<link rel="preconnect" href="https://www.desmos.com">
+<!-- Desmos (about 1 MB, behind a redirect to the current v1.11.x) is the longest download and a
+     trace waits for it, so it starts now, at low priority; app.js runs it once the page is up.
+     The URL must be app.js's DESMOS_API exactly, or it is fetched twice. -->
+<link rel="preload" href="https://www.desmos.com/api/v1.11/calculator.js?apiKey=dcb31709b452b1cf9dc26972add0fda6" as="script" fetchpriority="low">
 </head>
 <body data-state="empty">
 
@@ -174,5 +177,17 @@
 <div class="offscreen" aria-hidden="true"><div id="export-calc"></div></div>
 
 <noscript><p class="noscript">desmeows traces video in your browser and needs javascript turned on.</p></noscript>
+<script>
+// Later visits, and this one's traces once it is installed, load from a stored copy of the app
+// (sw.js). It is registered once this visit has fetched Desmos, so installing it copies files
+// out of the browser cache rather than downloading them again alongside the page.
+if ('serviceWorker' in navigator) {
+  new PerformanceObserver((list, observer) => {
+    if (!list.getEntries().some((e) => e.name.startsWith('https://www.desmos.com/api/'))) return;
+    observer.disconnect();
+    navigator.serviceWorker.register('sw.js', { updateViaCache: 'none' }).catch(() => {});
+  }).observe({ type: 'resource', buffered: true });
+}
+</script>
 </body>
 </html>
