@@ -1,9 +1,42 @@
-import {
-  Input, ALL_FORMATS, BlobSource, CanvasSink, Output, Mp4OutputFormat, BufferTarget,
-  CanvasSource, EncodedPacketSink, EncodedAudioPacketSource, canEncodeVideo,
-} from 'https://cdn.jsdelivr.net/npm/mediabunny@1.65.2/dist/bundles/mediabunny.min.mjs';
 import { SceneCutter, sceneSamples } from './palette.js';
 import { slotState, frameExprs, widthExprs, packLayer, Painter, rasterize } from './render.js';
+
+// ---------------------------------------------------------------- dependencies
+
+// Neither is needed to show the first screen, so neither holds it up. mediabunny reads and
+// writes the video: index.html preloads it, and load() waits for it (a failed module import
+// stays failed, so that takes a reload). Desmos is about 1 MB of script: it is fetched once
+// the page and mediabunny are in, or as soon as a file is chosen if that is sooner, awaited
+// before the first calculator is made, and fetched again by the next trace if it failed.
+let Input, ALL_FORMATS, BlobSource, CanvasSink, Output, Mp4OutputFormat, BufferTarget,
+  CanvasSource, EncodedPacketSink, EncodedAudioPacketSource, canEncodeVideo;
+const mediabunny = import('https://cdn.jsdelivr.net/npm/mediabunny@1.65.2/dist/bundles/mediabunny.min.mjs').then((m) => {
+  ({ Input, ALL_FORMATS, BlobSource, CanvasSink, Output, Mp4OutputFormat, BufferTarget,
+    CanvasSource, EncodedPacketSink, EncodedAudioPacketSource, canEncodeVideo } = m);
+});
+mediabunny.catch(() => {}); // reported by load()
+
+// The key is the public demo key from the Desmos API docs: fine for running this locally,
+// replace it with your own (desmos.com/api) before putting the page online.
+const DESMOS_API = 'https://www.desmos.com/api/v1.11/calculator.js?apiKey=dcb31709b452b1cf9dc26972add0fda6';
+let desmosLoad = null;
+function desmos() {
+  return desmosLoad ||= new Promise((resolve, reject) => {
+    const s = document.createElement('script');
+    const failed = () => {
+      s.remove();
+      desmosLoad = null;
+      reject(new Error('could not load the desmos calculator. check the connection and try again.'));
+    };
+    s.onload = () => (window.Desmos ? resolve(window.Desmos) : failed());
+    s.onerror = failed;
+    s.src = DESMOS_API;
+    document.head.append(s);
+  });
+}
+
+const pageLoaded = new Promise((r) => (document.readyState === 'complete' ? r() : addEventListener('load', r, { once: true })));
+Promise.allSettled([mediabunny, pageLoaded]).then(() => desmos().catch(() => {}));
 
 // ---------------------------------------------------------------- settings
 
@@ -136,6 +169,12 @@ async function load(file) {
   $('file-name').textContent = file.name;
   $('frame-label').textContent = 'source';
   $('frame-note').textContent = 'reading the file';
+  desmos().catch(() => {});
+  try {
+    await mediabunny;
+  } catch {
+    return fail('could not load the video reader. check the connection and reload the page.');
+  }
   try {
     const input = new Input({ formats: ALL_FORMATS, source: new BlobSource(file) });
     const video = await input.getPrimaryVideoTrack();
@@ -314,7 +353,7 @@ async function trace() {
 
   try {
     clip = next;
-    ensureCalc(W, H, style);
+    await Promise.race([ensureCalc(W, H, style), failure]);
     $('frame-label').textContent = 'desmos';
     body.classList.remove('comparing');
     progress('reading frames', 0, count);
@@ -436,8 +475,9 @@ const CALC_OPTIONS = {
   links: false, images: false, folders: false, notes: false, sliders: false,
 };
 
-function ensureCalc(W, H, style) {
+async function ensureCalc(W, H, style) {
   if (!calc) {
+    const Desmos = await desmos();
     calc = Desmos.GraphingCalculator($('calc'), { ...CALC_OPTIONS, backgroundColor: colorToken('--color-paper') });
     painter = new Painter(calc);
     new ResizeObserver(() => applyWidths()).observe($('calc'));
@@ -654,7 +694,7 @@ async function exportMp4() {
   if (viaDesmos) {
     const el = $('export-calc');
     el.style.width = `${W}px`; el.style.height = `${H}px`;
-    if (!exportCalc) exportCalc = Desmos.GraphingCalculator(el, CALC_OPTIONS);
+    if (!exportCalc) exportCalc = (await desmos()).GraphingCalculator(el, CALC_OPTIONS);
     exportCalc.setState(slotState(exportCalc.getState(), W, H));
     exportPainter = new Painter(exportCalc);
     exportCalc.setMathBounds({ left: 0, right: W, bottom: 0, top: H });

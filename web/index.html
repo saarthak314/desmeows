@@ -9,13 +9,25 @@
 <link rel="icon" href="favicon.svg" type="image/svg+xml">
 <link rel="icon" href="favicon-32.png" type="image/png" sizes="32x32">
 <link rel="apple-touch-icon" href="apple-touch-icon.png">
-<link rel="preload" href="fonts/ibm-plex-mono-400.woff2" as="font" type="font/woff2" crossorigin>
-<link rel="preload" href="fonts/jetbrains-mono-symbols.woff2" as="font" type="font/woff2" crossorigin>
 <link rel="stylesheet" href="app.css">
-<!-- Desmos API. The key is the public demo key from the Desmos API docs: fine for running
-     this locally, replace it with your own (desmos.com/api) before putting the page online. -->
-<script src="https://www.desmos.com/api/v1.11/calculator.js?apiKey=dcb31709b452b1cf9dc26972add0fda6"></script>
+<!-- app.css @imports these two; fetched now, they don't wait for it -->
+<link rel="preload" href="tokens.css" as="style">
+<link rel="preload" href="base.css" as="style">
+<!-- the first screen's faces; the symbols are for the progress rails, needed later -->
+<link rel="preload" href="fonts/instrument-serif-400.woff2" as="font" type="font/woff2" crossorigin>
+<link rel="preload" href="fonts/ibm-plex-mono-400.woff2" as="font" type="font/woff2" crossorigin>
+<link rel="preload" href="fonts/ibm-plex-mono-600.woff2" as="font" type="font/woff2" crossorigin>
+<link rel="preload" href="fonts/jetbrains-mono-symbols.woff2" as="font" type="font/woff2" crossorigin fetchpriority="low">
 <script type="module" src="app.js"></script>
+<!-- app.js's own imports, and mediabunny, which it awaits only once a file is chosen -->
+<link rel="modulepreload" href="render.js">
+<link rel="modulepreload" href="palette.js">
+<link rel="modulepreload" href="https://cdn.jsdelivr.net/npm/mediabunny@1.65.2/dist/bundles/mediabunny.min.mjs">
+<!-- the tracing workers' module, fetched now so a trace's workers all find it in the HTTP
+     cache (vercel.json lets it stay fresh for a few minutes) -->
+<link rel="modulepreload" href="tracer.js" fetchpriority="low">
+<!-- Desmos is loaded by app.js once the page is up; warm the connection for it -->
+<link rel="preconnect" href="https://www.desmos.com">
 </head>
 <body data-state="empty">
 
