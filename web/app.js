@@ -160,6 +160,8 @@ async function load(file) {
     return fail('this browser cannot decode video in the page. use a current chrome, edge, firefox or safari.');
   }
   setState('loaded');
+  // Trace waits until the file is open: clicking it earlier would have done nothing
+  $('trace').disabled = true;
   $('screen').hidden = false; $('sheet').hidden = false; $('new-video').hidden = false;
   $('file-name').textContent = file.name;
   $('frame-label').textContent = 'source';
@@ -196,6 +198,7 @@ async function load(file) {
   buildSizes();
   syncSettingsUI();
   layoutFrame();
+  $('trace').disabled = false;
 }
 
 function fail(msg) {
