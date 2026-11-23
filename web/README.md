@@ -10,23 +10,43 @@ the Desmos API and the mediabunny module from jsDelivr.
 | --- | --- |
 | `index.html` | the one screen: drop zone, stage, transport and the settings sheet |
 | `app.js` | the app: decoding, the worker pool, the two tracing passes, the live player, export, save as page |
-| `tracer.js` | the tracer, run as a module Web Worker, one frame per message |
+| `frame-worker.js` | the tracing worker: reads a frame out of the GPU bitmap it is sent, then runs `tracer.js` |
+| `tracer.js` | the tracer, one frame per message |
 | `palette.js` | scene-cut detection, k-means palettes in Lab, the 32×32×32 colour lookup |
-| `render.js` | turns a traced frame into Desmos expressions; shared by the player, the exporter and saved pages |
+| `render.js` | turns a traced frame into Desmos expressions, or draws it straight onto a canvas; shared by the player, the exporter and saved pages |
+| `raster-worker.js` | the export's drawing worker: draws a frame at the output size, stamps the credit, converts it to the encoder's YUV |
 | `app.css`, `tokens.css`, `base.css` | styles: page rules, the design tokens, shared base rules |
 | `fonts/` | IBM Plex Mono, Instrument Serif and a JetBrains Mono symbol subset, with their licences |
 | `vercel.json`, `.vercelignore` | cache and security headers, and what stays out of a deploy |
 
+## Loading
+
+The first screen needs none of the heavy parts. Desmos (about 1 MB) is loaded after the
+page has painted, or as soon as a file is chosen if that comes first; mediabunny is a
+dynamic import, preloaded. The tracing workers' modules are preloaded too, and JS and CSS
+may be cached for five minutes (`vercel.json`), so a trace's workers all start from the
+browser cache instead of revalidating one after another.
+
 ## Pipeline
 
-**Pass 1, scenes and palettes.** Every frame is decoded at 160 px wide. A cut is a jump
-in both the colour histogram and the pixels between neighbouring frames. Each scene
-gets its own k-means palette in Lab colour space, computed in the workers and turned
-into a 5-bit RGB lookup table. One palette per scene keeps region boundaries steady
-from frame to frame instead of flickering.
+Two passes run at the same time and meet at scene boundaries.
 
-**Pass 2, tracing.** Frames are decoded at trace size and sent to a pool of workers
-(one fewer than the CPU's cores, at most eight), a few in flight per worker.
+**Reading: scenes and palettes.** Every frame is decoded at 160 px wide. A cut is a jump
+in both the colour histogram and the pixels between neighbouring frames. As soon as a
+scene's last frame is read, its k-means palette in Lab colour space is mixed in the
+worker pool and sent to every worker as a 5-bit RGB lookup table. One palette per scene
+keeps region boundaries steady from frame to frame instead of flickering. These
+thumbnails are decoded in software: the tracing pass waits on the scenes this pass
+finds, and if both drew on the GPU's limited decoder surfaces they could starve each
+other.
+
+**Tracing.** Frames are decoded at trace size, scaled on the GPU, snapshotted as
+`ImageBitmap`s and transferred to a pool of workers (every core but one, at most 16), a
+few in flight per worker. Each worker reads its frame back itself, so the GPU round trip
+(about a millisecond a frame) never blocks the page. A frame waits only until its
+scene's palette is out. If no frame is read or traced for 30 seconds (a decoder that
+stopped answering), the trace ends with an error instead of waiting forever. The same
+video traces to the same shapes every time.
 
 - *Paint*: quantise to the scene's palette, a 3×3 majority filter against speckle,
   4-connected regions, regions under the minimum area merged into the neighbour they
@@ -41,12 +61,17 @@ from frame to frame instead of flickering.
   left to the fills.
 - *Lines*: the same edges, coloured from their bright side, on black.
 
+Every coordinate this produces is a multiple of half a pixel, so shapes are stored as
+16-bit integers in half-pixel units: exact, and half the memory of floats.
+
 ## Drawing in Desmos
 
 Every shape is one element of a polygon list, coloured from a parallel `rgb()` list.
 Lines are zero-area polygons that go out and back, so only their outline shows. Notes
 that shaped `render.js`:
 
+- The graph's axes are set in half-pixel units (`bounds()` in `render.js`), so Desmos is
+  given plain integers.
 - Per-element colours only work through `colorLatex` set in the graph state, so the
   slots are created once with `setState` and only their latex changes per frame.
 - A Desmos list holds at most 10,000 items, so each layer is split into chunks of 8,000
@@ -59,19 +84,33 @@ that shaped `render.js`:
 
 ## Export
 
-Each frame is drawn in a hidden calculator and captured with `asyncScreenshot` at the
-output size. The graph is vector, so it can render above the source resolution: the
-size picker offers 720p to 4K, whichever the browser can encode. Frames are encoded
-to H.264 through WebCodecs at about 0.16 bits per pixel, the source's audio packets
-are copied across without re-encoding, and mediabunny writes the mp4.
+The graph is vector, so it can render above the source resolution: the size picker
+offers 720p to 4K, whichever the browser can encode. Two renderers, chosen under
+*drawn by*:
 
-*Save as page* writes a single HTML file: the traced frames at half-pixel precision,
+- *direct* (the default) draws the same polygons, colours and line widths Desmos is
+  given straight onto a canvas, with no Desmos parse, evaluate and screenshot round
+  trip. Several `raster-worker.js` workers draw at once, a few on the GPU and the rest on
+  CPU threads (Chrome replays every GPU canvas on one thread, so CPU workers are what
+  scale with cores). Each stamps the credit and converts its frame to the encoder's YUV
+  itself, so the page only hands frames to the encoder, in order. Its frames match
+  Desmos's own to within anti-aliasing.
+- *desmos* draws each frame in a hidden calculator and captures it with
+  `asyncScreenshot`, for a video drawn by the calculator itself. It is much slower.
+
+Frames are encoded to H.264 through WebCodecs at about 0.16 bits per pixel, the
+source's audio packets are copied across without re-encoding, and mediabunny writes the
+mp4. The bottom-right "desmeows" credit switches to dark ink over bright corners.
+
+*Save as page* writes a single HTML file: the traced frames as stored,
 `render.js` inlined, and a small player.
 
 ## Settings in the URL
 
 `style` (`paint`, `lines`), `fidelity` (`draft`, `fine`, `max`, `limit`), `fps`
-(`source`, `24`, `12`), `ink=off`, `size` (`720p` … `4K`). The defaults are left out.
+(`source`, `24`, `12`), `ink=off`, `size` (`720p` … `4K`), `renderer=desmos`,
+`credit=off`. The defaults are left out. `debug` exposes the app's state on
+`window.__desmeows`, for benchmarking.
 
 | Fidelity | Trace width | Colours a scene | Smallest region | Simplify (px) |
 | --- | --- | --- | --- | --- |

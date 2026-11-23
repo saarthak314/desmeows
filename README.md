@@ -25,7 +25,8 @@ It all runs in your browser. The video is never uploaded anywhere.
 4. **Draw.** Each frame becomes a few Desmos expressions: lists of polygons with a
    colour for every element, largest first, so smaller shapes paint over the ones
    beneath them.
-5. **Export.** Desmos draws each frame again at the output size, WebCodecs encodes it
+5. **Export.** Workers draw each frame again at the output size, from the same polygons
+   Desmos is given (or Desmos itself draws them, if you choose), WebCodecs encodes them
    to H.264, and the source's audio is copied across untouched.
 
 The full pipeline, and what had to bend to fit inside Desmos, is in
@@ -43,14 +44,16 @@ the edges, each in its own colour, on black.
 | max | 960 px | 128 | 4 px |
 | limit | 1280 px | 255 | 2 px |
 
-On a 21-second 1280×720 clip at 30 fps, *fine* averaged about 1,700 shapes and 18,000
-vertices a frame and traced in 9 seconds; *limit* averaged 16,700 shapes and 135,000
-vertices a frame and took about 3 minutes. A 1080p export at *fine* took 2 minutes 21
-seconds; a *limit* frame takes about 1.2 seconds to draw at 4K.
+On a 21-second 1280×720 clip at 30 fps (638 frames, Chrome on an Apple-silicon Mac),
+*fine* averages about 1,600 shapes and 17,000 vertices a frame and traces in 2.5
+seconds; *limit* averages 16,500 shapes and 123,000 vertices a frame and traces in about
+9 seconds. Exporting the *fine* trace at 1080p takes 2.5 seconds; the *limit* trace at
+4K, about 11 seconds. The same video traces to the same shapes every time.
 
 Desmos can't redraw thousands of shapes 30 times a second, so while a clip plays the
-live graph draws each frame's largest 600 shapes (300 on phones). Pause to see every
-shape. The export always draws all of them.
+live graph draws each frame's largest 600 shapes (300 on phones), about 23 frames a
+second of the clip's 30 at *fine*. Pause to see every shape. The export always draws all
+of them.
 
 ## Run it locally
 
