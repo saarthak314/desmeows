@@ -125,3 +125,35 @@ export class Painter {
     if (changed.length) this.calc.setExpressions(changed);
   }
 }
+
+// Draws a frame's polygons straight onto a 2D canvas: the same shapes, colours, order and
+// line widths Desmos is given, without Desmos's parse, evaluate and screenshot round trip.
+// ctx is outW x outH; s = output pixels per trace pixel. Widths mirror widthExprs at scale 1.
+export function rasterize(ctx, frame, style, W, H, s) {
+  const bg = style === 'paint' && frame.mean ? frame.mean : [0, 0, 0];
+  ctx.fillStyle = `rgb(${bg[0]},${bg[1]},${bg[2]})`;
+  ctx.fillRect(0, 0, ctx.canvas.width, ctx.canvas.height);
+  ctx.lineJoin = 'round';
+  ctx.lineCap = 'round';
+  const seal = Math.max(0.5, 1) * s;
+  const line = Math.max(0.6, (style === 'lines' ? 1.6 : 1.1) * Math.max(1, W / 640)) * s;
+  const layer = (L, fill) => {
+    if (!L) return;
+    ctx.lineWidth = fill ? seal : line;
+    let v = 0;
+    for (let k = 0; k < L.counts.length; k++) {
+      const c = L.counts[k];
+      const col = `rgb(${L.rgb[3 * k]},${L.rgb[3 * k + 1]},${L.rgb[3 * k + 2]})`;
+      ctx.beginPath();
+      ctx.moveTo(L.verts[2 * v] * s, (H - L.verts[2 * v + 1]) * s);
+      for (let i = 1; i < c; i++) ctx.lineTo(L.verts[2 * (v + i)] * s, (H - L.verts[2 * (v + i) + 1]) * s);
+      ctx.closePath();
+      v += c;
+      if (fill) { ctx.fillStyle = col; ctx.fill(); }
+      ctx.strokeStyle = col;
+      ctx.stroke();
+    }
+  };
+  layer(frame.fill, true);
+  layer(frame.line, false);
+}

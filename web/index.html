@@ -134,6 +134,14 @@
         <legend>size</legend>
         <div class="seg" role="radiogroup" id="size-seg"></div>
       </fieldset>
+      <fieldset class="row">
+        <legend>drawn by</legend>
+        <div class="seg" role="radiogroup">
+          <label><input type="radio" name="renderer" value="direct" checked><span>direct</span></label>
+          <label><input type="radio" name="renderer" value="desmos"><span>desmos</span></label>
+        </div>
+        <p class="row-note" id="renderer-note"></p>
+      </fieldset>
       <div class="row">
         <label class="switch" for="credit">
           <input type="checkbox" id="credit" role="switch" checked>

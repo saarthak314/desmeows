@@ -2,8 +2,8 @@ import {
   Input, ALL_FORMATS, BlobSource, CanvasSink, Output, Mp4OutputFormat, BufferTarget,
   CanvasSource, EncodedPacketSink, EncodedAudioPacketSource, canEncodeVideo,
 } from 'https://cdn.jsdelivr.net/npm/mediabunny@1.65.2/dist/bundles/mediabunny.min.mjs';
-import { detectScenes, sceneSamples } from './palette.js';
-import { slotState, frameExprs, widthExprs, packLayer, Painter } from './render.js';
+import { SceneCutter, sceneSamples } from './palette.js';
+import { slotState, frameExprs, widthExprs, packLayer, Painter, rasterize } from './render.js';
 
 // ---------------------------------------------------------------- settings
 
@@ -40,6 +40,7 @@ const settings = {
   ink: params.get('ink') !== 'off',
   size: params.get('size') || '',
   credit: params.get('credit') !== 'off',
+  renderer: params.get('renderer') === 'desmos' ? 'desmos' : 'direct',
 };
 
 function syncSettingsUI() {
@@ -49,6 +50,11 @@ function syncSettingsUI() {
   }
   $('ink').checked = settings.ink;
   $('credit').checked = settings.credit;
+  const rin = document.querySelector(`input[name="renderer"][value="${settings.renderer}"]`);
+  if (rin) rin.checked = true;
+  $('renderer-note').textContent = settings.renderer === 'direct'
+    ? 'the same polygons desmos is given, drawn straight by your gpu. several times faster.'
+    : 'every frame drawn and screenshotted by the desmos calculator itself.';
   body.classList.toggle('credited', settings.credit);
   body.dataset.style = settings.style;
   $('fidelity-note').textContent = media ? TIER_NOTE[settings.style][settings.fidelity](traceWidth()) : '';
@@ -59,6 +65,7 @@ function syncSettingsUI() {
   if (!settings.ink) q.set('ink', 'off');
   if (settings.size) q.set('size', settings.size);
   if (!settings.credit) q.set('credit', 'off');
+  if (settings.renderer !== 'direct') q.set('renderer', settings.renderer);
   history.replaceState(null, '', q.size ? `?${q}` : location.pathname);
   markStale();
 }
@@ -69,6 +76,7 @@ document.addEventListener('change', (e) => {
   else if (t.id === 'ink') settings.ink = t.checked;
   else if (t.name === 'size') { settings.size = t.value; syncSettingsUI(); return; }
   else if (t.id === 'credit') { settings.credit = t.checked; syncSettingsUI(); return; }
+  else if (t.name === 'renderer') { settings.renderer = t.value; syncSettingsUI(); return; }
   else return;
   syncSettingsUI();
 });
@@ -191,9 +199,9 @@ async function showSource(t, index = -2) {
 // ---------------------------------------------------------------- worker pool
 
 class Pool {
-  constructor(n) {
+  constructor(n, script = './tracer.js') {
     this.workers = Array.from({ length: n }, () => {
-      const w = new Worker(new URL('./tracer.js', import.meta.url), { type: 'module' });
+      const w = new Worker(new URL(script, import.meta.url), { type: 'module' });
       w.busy = null;
       w.onmessage = (e) => { const r = w.busy; w.busy = null; r.resolve(e.data); this.pump(); };
       w.onerror = (e) => { const r = w.busy; w.busy = null; if (r) r.reject(new Error(e.message || 'Tracer failed')); this.pump(); };
@@ -224,6 +232,8 @@ class Pool {
       w.postMessage(job.msg, job.transfer);
     }
   }
+  // to every worker, outside the request/reply flow (for messages that get no reply)
+  post(msg) { for (const w of this.workers) w.postMessage(msg); }
   terminate() { for (const w of this.workers) w.terminate(); }
 }
 
@@ -254,50 +264,70 @@ async function trace() {
     detail: tier.detail, lineEpsilon: tier.lineEpsilon, minLen: tier.minLen, maxLinePoints: tier.maxLinePoints,
   };
   const next = { W, H, fps, style, frames: new Array(count), scenes: 1, key: settingsKey(), name: media.file.name };
-  const pool = new Pool(Math.max(2, Math.min(8, (navigator.hardwareConcurrency || 4) - 1)));
+  // every core but one, which is left for decoding and the page
+  const pool = new Pool(Math.max(2, Math.min(16, (navigator.hardwareConcurrency || 4) - 1)));
   let shown = -1, lastPreview = 0;
 
-  try {
-    // Pass 1: small thumbnails for scene cuts and palettes.
-    progress('reading frames', 0, count);
-    const TW = 160, TH = even(160 * H / W);
-    const thumbSink = new CanvasSink(media.video, { width: TW, height: TH, fit: 'fill', poolSize: 1 });
-    const thumbs = [];
-    for await (const wrapped of thumbSink.canvasesAtTimestamps(times)) {
-      if (stopping) throw new Stop();
-      thumbs.push(readPixels(wrapped, TW, TH));
-      if (thumbs.length % 8 === 0) progress('reading frames', thumbs.length, count);
-    }
-    const scene = detectScenes(thumbs);
-    next.scenes = scene[scene.length - 1] + 1;
-    const luts = [];
-    if (style === 'paint') {
-      progress(`mixing ${next.scenes} ${next.scenes === 1 ? 'palette' : 'palettes'}`, 0, next.scenes);
-      let done = 0;
-      await Promise.all(Array.from({ length: next.scenes }, (_, s) => {
-        const samples = sceneSamples(thumbs, scene, s);
-        return pool.run({ type: 'kmeans', samples, k: tier.k, iters: tier.iters }, [samples.buffer]).then((r) => {
-          luts[s] = r.lut;
-          progress(`mixing ${next.scenes} ${next.scenes === 1 ? 'palette' : 'palettes'}`, ++done, next.scenes);
-        });
-      }));
-      if (stopping) throw new Stop();
-      await pool.broadcast({ type: 'palettes', luts });
-    }
+  // Pass 1 (reader) and pass 2 (tracer) run at the same time. The reader decodes small
+  // thumbnails, finds each cut as it reaches it, and mixes that scene's palette in the pool;
+  // the tracer decodes full-size frames and only waits until its scene's palette is out.
+  const scene = new Int32Array(count).fill(-1);
+  const thumbs = [];
+  const ready = [];
+  const sceneReady = (s) => ready[s] || (ready[s] = (() => { let r; const p = new Promise((res) => (r = res)); p.done = r; return p; })());
+  let read = 0, wake = null, abort = false;
+  let fail;
+  const failure = new Promise((_, rej) => (fail = rej));
+  failure.catch(() => {});
+  const waitRead = () => Promise.race([new Promise((r) => (wake = r)), failure]);
 
-    // Pass 2: full-size frames through the tracer, a few per worker in flight.
+  const reader = (async () => {
+    const TW = 160, TH = even(160 * H / W);
+    const thumbSink = new CanvasSink(media.video, { poolSize: 1 });
+    const readThumb = frameReader(TW, TH);
+    const cutter = new SceneCutter();
+    let cur = 0;
+    const close = (s) => {
+      if (style !== 'paint') { sceneReady(s).done(); return; }
+      const samples = sceneSamples(thumbs, scene, s);
+      pool.run({ type: 'kmeans', samples, k: tier.k, iters: tier.iters }, [samples.buffer]).then((r) => {
+        pool.post({ type: 'palette-add', index: s, lut: r.lut });
+        sceneReady(s).done();
+      }, (e) => fail(e));
+    };
+    for await (const wrapped of thumbSink.canvasesAtTimestamps(times)) {
+      if (stopping || abort) throw new Stop();
+      const px = readThumb(wrapped);
+      thumbs.push(px);
+      const s = cutter.push(px);
+      scene[read] = s;
+      if (s !== cur) { close(cur); cur = s; }
+      read++;
+      if (wake) { const w = wake; wake = null; w(); }
+    }
+    close(cur);
+    next.scenes = cur + 1;
+    read = count;
+    if (wake) { const w = wake; wake = null; w(); }
+  })();
+  reader.catch((e) => fail(e));
+
+  try {
     clip = next;
     ensureCalc(W, H, style);
     $('frame-label').textContent = 'desmos';
     body.classList.remove('comparing');
-    progress('tracing', 0, count);
-    const sink = new CanvasSink(media.video, { width: W, height: H, fit: 'fill', poolSize: 1 });
+    progress('reading frames', 0, count);
+    const sink = new CanvasSink(media.video, { poolSize: 1 });
+    const readFrame = frameReader(W, H);
     let i = 0, done = 0;
     const pending = new Set();
     for await (const wrapped of sink.canvasesAtTimestamps(times)) {
       if (stopping) throw new Stop();
-      const rgba = readPixels(wrapped, W, H);
       const id = i++;
+      while (read <= id) await waitRead();
+      await Promise.race([sceneReady(scene[id]), failure]);
+      const rgba = readFrame(wrapped);
       const job = pool.run({ id, w: W, h: H, rgba, opts: { ...opts, scene: scene[id] } }, [rgba.buffer]).then((r) => {
         next.frames[r.id] = { fill: r.fill, line: r.line, mean: r.mean };
         done++;
@@ -307,8 +337,9 @@ async function trace() {
         if (r.id > shown && now - lastPreview > 250) { shown = r.id; lastPreview = now; drawFrame(r.id, LIVE_CAP); }
       });
       pending.add(job);
-      while (pool.inFlight >= pool.size * 2) await Promise.race(pending);
+      while (pool.inFlight >= pool.size * 2) await Promise.race([...pending, failure]);
     }
+    await reader;
     await Promise.all(pending);
     finishTrace();
   } catch (err) {
@@ -323,15 +354,27 @@ async function trace() {
       showError(`tracing stopped: ${err.message || err}`);
     }
   } finally {
+    abort = true;
     pool.terminate();
   }
 }
 
 class Stop extends Error {}
 
-function readPixels(wrapped, w, h) {
-  const ctx = wrapped.canvas.getContext('2d', { willReadFrequently: true });
-  return ctx.getImageData(0, 0, w, h).data;
+// Frames come out of the decoder at native size and are scaled here, on a canvas that is
+// CPU-backed from the start (willReadFrequently). Scaling on the decoder's own canvas left it
+// to Chrome, which can move a canvas it sees read back often from GPU to CPU mid-run, and the
+// two scale differently: a trace could come out slightly different each time.
+function frameReader(w, h) {
+  const c = document.createElement('canvas');
+  c.width = w; c.height = h;
+  const ctx = c.getContext('2d', { willReadFrequently: true });
+  ctx.imageSmoothingEnabled = true;
+  ctx.imageSmoothingQuality = 'medium';
+  return (wrapped) => {
+    ctx.drawImage(wrapped.canvas, 0, 0, w, h);
+    return ctx.getImageData(0, 0, w, h).data;
+  };
 }
 
 function progress(label, n, total) {
@@ -606,13 +649,17 @@ async function exportMp4() {
   showExportError('');
   $('export-progress').hidden = false;
   for (const b of ['export-mp4', 'save-page', 'trace']) $(b).disabled = true;
-  const el = $('export-calc');
-  el.style.width = `${W}px`; el.style.height = `${H}px`;
-  if (!exportCalc) exportCalc = Desmos.GraphingCalculator(el, CALC_OPTIONS);
-  exportCalc.setState(slotState(exportCalc.getState(), W, H));
-  const exportPainter = new Painter(exportCalc);
-  exportCalc.setMathBounds({ left: 0, right: W, bottom: 0, top: H });
-  exportCalc.setExpressions(widthExprs(style, W, 1));
+  const viaDesmos = settings.renderer === 'desmos';
+  let exportPainter = null;
+  if (viaDesmos) {
+    const el = $('export-calc');
+    el.style.width = `${W}px`; el.style.height = `${H}px`;
+    if (!exportCalc) exportCalc = Desmos.GraphingCalculator(el, CALC_OPTIONS);
+    exportCalc.setState(slotState(exportCalc.getState(), W, H));
+    exportPainter = new Painter(exportCalc);
+    exportCalc.setMathBounds({ left: 0, right: W, bottom: 0, top: H });
+    exportCalc.setExpressions(widthExprs(style, W, 1));
+  }
 
   const canvas = document.createElement('canvas');
   canvas.width = outW; canvas.height = outH;
@@ -632,21 +679,57 @@ async function exportMp4() {
     }
     await output.start();
 
+    // Direct export draws frames in parallel workers, a few ahead of the encoder, and takes
+    // them back in order. The window is sized so in-flight bitmaps stay under ~600 MB.
+    const parallel = !viaDesmos && typeof OffscreenCanvas !== 'undefined';
+    let raster = null;
+    const ahead = new Map();
+    let sent = 0;
+    const sendNext = () => {
+      if (!raster || sent >= frames.length) return;
+      const i = sent++;
+      ahead.set(i, raster.run({ i, frame: frames[i], style, W, H, outW, outH }));
+    };
+    if (parallel) {
+      const n = Math.max(2, Math.min(8, (navigator.hardwareConcurrency || 4) - 2));
+      raster = new Pool(n, './raster-worker.js');
+      const window = Math.max(2, Math.min(n * 2, Math.floor(600e6 / (outW * outH * 4))));
+      for (let k = 0; k < window; k++) sendNext();
+    }
+
     const started = performance.now();
+    try {
     for (let i = 0; i < frames.length; i++) {
       if (exportCancel) throw new Stop();
-      exportPainter.draw(frames[i], style);
-      const url = await screenshot(exportCalc, W, H, outW / W);
-      const img = new Image();
-      img.src = url;
-      await img.decode();
-      ctx.drawImage(img, 0, 0, outW, outH);
+      if (parallel) {
+        const { bitmap } = await ahead.get(i);
+        ahead.delete(i);
+        sendNext();
+        ctx.drawImage(bitmap, 0, 0);
+        bitmap.close();
+      } else if (viaDesmos) {
+        exportPainter.draw(frames[i], style);
+        const url = await screenshot(exportCalc, W, H, outW / W);
+        const img = new Image();
+        img.src = url;
+        await img.decode();
+        ctx.drawImage(img, 0, 0, outW, outH);
+      } else {
+        rasterize(ctx, frames[i], style, W, H, outW / W);
+      }
       if (credit) credit.draw(ctx);
       await video.add(i / fps, 1 / fps);
       const left = (performance.now() - started) / (i + 1) * (frames.length - i - 1);
       $('export-figure').textContent = `${i + 1} / ${frames.length}`;
-      $('export-label').textContent = i < 3 ? 'drawing frames in desmos' : `drawing in desmos, about ${fmtDuration(left)} left`;
+      const verb = viaDesmos ? 'drawing in desmos' : 'drawing frames';
+      $('export-label').textContent = i < 3 ? verb : `${verb}, about ${fmtDuration(left)} left`;
       $('export-meter').style.setProperty('--progress', (i + 1) / frames.length);
+    }
+    } finally {
+      if (raster) {
+        for (const p of ahead.values()) p.then((r) => r.bitmap.close(), () => {});
+        raster.terminate();
+      }
     }
 
     if (audio) {
@@ -772,3 +855,6 @@ function fmtBytes(b) {
 }
 
 syncSettingsUI();
+
+// ?debug exposes the live state for benchmarking and diagnosis; nothing reads it otherwise.
+if (params.has('debug')) window.__desmeows = { get clip() { return clip; }, get calc() { return calc; }, get media() { return media; }, settings };

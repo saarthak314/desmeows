@@ -79,29 +79,38 @@ export function buildLUT(C) {
 }
 
 // Scene cuts from small thumbnails (RGBA, same size). A cut is a big jump in both the
-// colour histogram and the pixels. Returns scene index per frame.
-export function detectScenes(thumbs, minLen = 6) {
-  const hist = (t) => {
-    const h = new Float32Array(64);
-    const n = t.length >> 2;
-    for (let j = 0; j < t.length; j += 4) h[((t[j] >> 6) << 4) | ((t[j + 1] >> 6) << 2) | (t[j + 2] >> 6)] += 1 / n;
-    return h;
-  };
-  const scene = new Int32Array(thumbs.length);
-  let prevH = thumbs.length ? hist(thumbs[0]) : null, s = 0, last = 0;
-  for (let i = 1; i < thumbs.length; i++) {
-    const h = hist(thumbs[i]);
-    let hd = 0;
-    for (let k = 0; k < 64; k++) hd += Math.abs(h[k] - prevH[k]);
-    let pd = 0;
-    const a = thumbs[i], b = thumbs[i - 1];
-    for (let j = 0; j < a.length; j += 4) pd += Math.abs(a[j] - b[j]) + Math.abs(a[j + 1] - b[j + 1]) + Math.abs(a[j + 2] - b[j + 2]);
-    pd /= (a.length >> 2) * 3;
-    if (hd > 0.5 && pd > 20 && i - last >= minLen) { s++; last = i; }
-    scene[i] = s;
-    prevH = h;
+// colour histogram and the pixels. SceneCutter takes frames one at a time, so cuts (and the
+// palettes that depend on them) can be found while the video is still being read.
+function hist64(t) {
+  const h = new Float32Array(64);
+  const n = t.length >> 2;
+  for (let j = 0; j < t.length; j += 4) h[((t[j] >> 6) << 4) | ((t[j + 1] >> 6) << 2) | (t[j + 2] >> 6)] += 1 / n;
+  return h;
+}
+
+export class SceneCutter {
+  constructor(minLen = 6) { this.minLen = minLen; this.i = 0; this.s = 0; this.last = 0; this.prev = null; this.prevH = null; }
+  // the scene index of this frame
+  push(t) {
+    const h = hist64(t);
+    if (this.i > 0) {
+      let hd = 0;
+      for (let k = 0; k < 64; k++) hd += Math.abs(h[k] - this.prevH[k]);
+      let pd = 0;
+      const b = this.prev;
+      for (let j = 0; j < t.length; j += 4) pd += Math.abs(t[j] - b[j]) + Math.abs(t[j + 1] - b[j + 1]) + Math.abs(t[j + 2] - b[j + 2]);
+      pd /= (t.length >> 2) * 3;
+      if (hd > 0.5 && pd > 20 && this.i - this.last >= this.minLen) { this.s++; this.last = this.i; }
+    }
+    this.prev = t; this.prevH = h; this.i++;
+    return this.s;
   }
-  return scene;
+}
+
+// Scene index per frame for a whole list of thumbnails.
+export function detectScenes(thumbs, minLen = 6) {
+  const cut = new SceneCutter(minLen);
+  return Int32Array.from(thumbs, (t) => cut.push(t));
 }
 
 // Lab samples for one scene, from up to 16 of its thumbnails, about `target` in all.

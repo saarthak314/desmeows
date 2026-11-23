@@ -16,6 +16,8 @@ let LUTS = []; // per scene: Uint8Array(32768), 5-bit RGB -> palette index
 
 let lastTransfer = [];
 if (typeof self !== 'undefined') self.onmessage = ({ data }) => {
+  // one scene's palette, sent ahead of that scene's frames; no reply
+  if (data.type === 'palette-add') { LUTS[data.index] = data.lut; return; }
   const res = handle(data);
   self.postMessage(res, lastTransfer);
 };
@@ -218,23 +220,28 @@ function modeFilter(src, w, h) {
   const dst = new Uint8Array(src.length);
   const nb = new Uint8Array(9);
   for (let y = 0; y < h; y++) {
+    const ym = y > 0 ? y - 1 : 0, yp = y < h - 1 ? y + 1 : h - 1;
+    const r0 = ym * w, r1 = y * w, r2 = yp * w;
     for (let x = 0; x < w; x++) {
-      let c = 0;
-      for (let dy = -1; dy <= 1; dy++) {
-        const yy = y + dy < 0 ? 0 : y + dy >= h ? h - 1 : y + dy;
-        for (let dx = -1; dx <= 1; dx++) {
-          const xx = x + dx < 0 ? 0 : x + dx >= w ? w - 1 : x + dx;
-          nb[c++] = src[yy * w + xx];
-        }
+      const xm = x > 0 ? x - 1 : 0, xp = x < w - 1 ? x + 1 : w - 1;
+      const c = src[r1 + x];
+      nb[0] = src[r0 + xm]; nb[1] = src[r0 + x]; nb[2] = src[r0 + xp];
+      nb[3] = src[r1 + xm]; nb[4] = c;          nb[5] = src[r1 + xp];
+      nb[6] = src[r2 + xm]; nb[7] = src[r2 + x]; nb[8] = src[r2 + xp];
+      // keep the centre unless a strict majority (5 of 9) is another label. Two labels can't
+      // both reach 5, so a centre that already holds 5 is the answer (the common, flat case)
+      let k = 0;
+      for (let i = 0; i < 9; i++) if (nb[i] === c) k++;
+      if (k >= 5) { dst[r1 + x] = c; continue; }
+      let out = c;
+      for (let i = 0; i < 5; i++) { // a majority value must sit in the first five slots
+        const v = nb[i];
+        if (v === c) continue;
+        let m = 0;
+        for (let j = 0; j < 9; j++) if (nb[j] === v) m++;
+        if (m >= 5) { out = v; break; }
       }
-      // keep the centre unless a strict majority (5 of 9) disagrees
-      let best = src[y * w + x], bc = 0;
-      for (let i = 0; i < 9; i++) {
-        let k = 0;
-        for (let j = 0; j < 9; j++) if (nb[j] === nb[i]) k++;
-        if (k > bc) { bc = k; best = nb[i]; }
-      }
-      dst[y * w + x] = bc >= 5 ? best : src[y * w + x];
+      dst[r1 + x] = out;
     }
   }
   return dst;
@@ -318,52 +325,87 @@ function pathLength(p) {
 // real ink, clearly darker than what it borders; edges between two shades are left to the
 // fills, which already draw them, and return null.
 function sideColor(rgba, w, h, p, ink) {
-  const samples = [];
   const step = Math.max(2, ((p.length >> 1) / 60 | 0) * 2);
+  const m = Math.ceil(p.length / step) * 25;
+  if (SC.lum.length < m) { SC.lum = new Float32Array(m * 2); SC.rgb = new Uint8Array(m * 6); SC.tmp = new Float32Array(m * 2); }
+  const lum = SC.lum, rgb = SC.rgb;
+  let n = 0;
   for (let k = 0; k < p.length; k += step) {
     const cx = p[k], cy = p[k + 1];
-    for (let dy = -2; dy <= 2; dy++) for (let dx = -2; dx <= 2; dx++) {
-      const x = Math.min(w - 1, Math.max(0, cx + dx)), y = Math.min(h - 1, Math.max(0, cy + dy));
-      const j = (y * w + x) * 4;
-      samples.push(rgba[j], rgba[j + 1], rgba[j + 2]);
+    for (let dy = -2; dy <= 2; dy++) {
+      const y = Math.min(h - 1, Math.max(0, cy + dy));
+      for (let dx = -2; dx <= 2; dx++) {
+        const x = Math.min(w - 1, Math.max(0, cx + dx));
+        const j = (y * w + x) * 4;
+        const r = rgba[j], g = rgba[j + 1], b = rgba[j + 2];
+        rgb[3 * n] = r; rgb[3 * n + 1] = g; rgb[3 * n + 2] = b;
+        lum[n++] = 0.299 * r + 0.587 * g + 0.114 * b;
+      }
     }
   }
-  const m = samples.length / 3;
-  const lum = new Float32Array(m);
-  for (let i = 0; i < m; i++) lum[i] = 0.299 * samples[3 * i] + 0.587 * samples[3 * i + 1] + 0.114 * samples[3 * i + 2];
-  const sorted = Float32Array.from(lum).sort();
-  const dark = sorted[Math.floor(m * 0.1)], hi = sorted[Math.floor(m * 0.7)];
-  if (ink && !(dark < 110 && dark < hi * 0.5)) return null;
-  const cut = ink ? sorted[Math.floor(m * 0.15)] : hi;
+  // the k-th smallest luminance, exactly as sorting would give it, without the sort
+  const kth = (k) => { const t = SC.tmp; t.set(lum.subarray(0, n)); return select(t, n, k); };
+  const hi = kth(Math.floor(n * 0.7));
+  let cut;
+  if (ink) {
+    const dark = kth(Math.floor(n * 0.1));
+    if (!(dark < 110 && dark < hi * 0.5)) return null;
+    cut = kth(Math.floor(n * 0.15));
+  } else cut = hi;
   let r = 0, g = 0, b = 0, c = 0;
-  for (let i = 0; i < m; i++) {
-    if (ink ? lum[i] <= cut : lum[i] >= cut) { r += samples[3 * i]; g += samples[3 * i + 1]; b += samples[3 * i + 2]; c++; }
+  for (let i = 0; i < n; i++) {
+    if (ink ? lum[i] <= cut : lum[i] >= cut) { r += rgb[3 * i]; g += rgb[3 * i + 1]; b += rgb[3 * i + 2]; c++; }
   }
   return [Math.round(r / c), Math.round(g / c), Math.round(b / c)];
 }
+const SC = { lum: new Float32Array(0), rgb: new Uint8Array(0), tmp: new Float32Array(0) };
+
+// Quickselect (Hoare partition): the value that would sit at index k of a[0..n) sorted.
+function select(a, n, k) {
+  let lo = 0, hi = n - 1;
+  while (lo < hi) {
+    const pivot = a[(lo + hi) >> 1];
+    let i = lo, j = hi;
+    while (i <= j) {
+      while (a[i] < pivot) i++;
+      while (a[j] > pivot) j--;
+      if (i <= j) { const t = a[i]; a[i] = a[j]; a[j] = t; i++; j--; }
+    }
+    if (k <= j) hi = j; else if (k >= i) lo = i; else return a[k];
+  }
+  return a[k];
+}
 
 // 5x5 bilateral filter: flattens shading and texture, keeps the hard ink lines.
+const RANGE_W = new Float32Array(1024), SPACE_W = new Float32Array(25);
+for (let i = 0; i < 1024; i++) RANGE_W[i] = Math.exp(-(i * 64) / (2 * 40 * 40));
+for (let dy = -2, k = 0; dy <= 2; dy++) for (let dx = -2; dx <= 2; dx++, k++) SPACE_W[k] = Math.exp(-(dx * dx + dy * dy) / (2 * 3 * 3));
 function bilateral(rgba, w, h) {
   const out = new Uint8ClampedArray(rgba.length);
-  const sc = 2 * 40 * 40, ss = 2 * 3 * 3;
-  const rangeW = new Float32Array(1024);
-  for (let i = 0; i < 1024; i++) rangeW[i] = Math.exp(-(i * 64) / sc);
-  const spaceW = new Float32Array(25);
-  for (let dy = -2, k = 0; dy <= 2; dy++) for (let dx = -2; dx <= 2; dx++, k++) spaceW[k] = Math.exp(-(dx * dx + dy * dy) / ss);
+  const px = new Uint32Array(rgba.buffer, rgba.byteOffset, rgba.length >> 2);
+  const rows = new Int32Array(5), cols = new Int32Array(5);
   for (let y = 0; y < h; y++) {
+    for (let d = 0; d < 5; d++) { const yy = y + d - 2; rows[d] = (yy < 0 ? 0 : yy >= h ? h - 1 : yy) * w; }
     for (let x = 0; x < w; x++) {
-      const j = (y * w + x) * 4;
-      const r0 = rgba[j], g0 = rgba[j + 1], b0 = rgba[j + 2];
-      let sr = 0, sg = 0, sb = 0, sw = 0;
-      for (let dy = -2, k = 0; dy <= 2; dy++) {
-        const yy = Math.min(h - 1, Math.max(0, y + dy));
-        for (let dx = -2; dx <= 2; dx++, k++) {
-          const xx = Math.min(w - 1, Math.max(0, x + dx));
-          const q = (yy * w + xx) * 4;
-          const dr = rgba[q] - r0, dg = rgba[q + 1] - g0, db = rgba[q + 2] - b0;
+      const p = y * w + x, j = p * 4;
+      for (let d = 0; d < 5; d++) { const xx = x + d - 2; cols[d] = xx < 0 ? 0 : xx >= w ? w - 1 : xx; }
+      // a window of one colour averages to that colour: skip the weights
+      const c = px[p];
+      let same = true;
+      for (let a = 0; a < 5 && same; a++) for (let b = 0; b < 5; b++) if (px[rows[a] + cols[b]] !== c) { same = false; break; }
+      if (same) { out[j] = rgba[j]; out[j + 1] = rgba[j + 1]; out[j + 2] = rgba[j + 2]; out[j + 3] = 255; continue; }
+      const r0 = c & 255, g0 = (c >>> 8) & 255, b0 = (c >>> 16) & 255; // little-endian RGBA
+      let sr = 0, sg = 0, sb = 0, sw = 0, k = 0;
+      for (let a = 0; a < 5; a++) {
+        const row = rows[a];
+        for (let b = 0; b < 5; b++, k++) {
+          const v = px[row + cols[b]];
+          const r = v & 255, g = (v >>> 8) & 255, bb = (v >>> 16) & 255;
+          const dr = r - r0, dg = g - g0, db = bb - b0;
           const d2 = (dr * dr + dg * dg + db * db) >> 6;
-          const wt = spaceW[k] * (d2 < 1024 ? rangeW[d2] : 0);
-          sr += rgba[q] * wt; sg += rgba[q + 1] * wt; sb += rgba[q + 2] * wt; sw += wt;
+          if (d2 >= 1024) continue;
+          const wt = SPACE_W[k] * RANGE_W[d2];
+          sr += r * wt; sg += g * wt; sb += bb * wt; sw += wt;
         }
       }
       out[j] = sr / sw; out[j + 1] = sg / sw; out[j + 2] = sb / sw; out[j + 3] = 255;
@@ -378,7 +420,13 @@ for (let i = 0; i < 256; i++) { const c = i / 255; GAMMA[i] = c <= 0.04045 ? c /
 function toLab(rgba, n) {
   const L = new Uint8Array(n), A = new Uint8Array(n), B = new Uint8Array(n);
   const f = (t) => (t > 0.008856 ? Math.cbrt(t) : 7.787 * t + 16 / 116);
+  // frames repeat the same colours constantly, so a small direct-mapped cache of
+  // rgb -> packed Lab skips most of the cube roots
+  const keys = new Int32Array(4096).fill(-1), vals = new Int32Array(4096);
   for (let i = 0, j = 0; i < n; i++, j += 4) {
+    const key = (rgba[j] << 16) | (rgba[j + 1] << 8) | rgba[j + 2];
+    const slot = (key ^ (key >>> 12) ^ (key >>> 7)) & 4095;
+    if (keys[slot] === key) { const v = vals[slot]; L[i] = v >>> 16; A[i] = (v >>> 8) & 255; B[i] = v & 255; continue; }
     const r = GAMMA[rgba[j]], g = GAMMA[rgba[j + 1]], b = GAMMA[rgba[j + 2]];
     const X = (0.412453 * r + 0.35758 * g + 0.180423 * b) / 0.950456;
     const Y = 0.212671 * r + 0.71516 * g + 0.072169 * b;
@@ -387,6 +435,7 @@ function toLab(rgba, n) {
     L[i] = Math.round((Y > 0.008856 ? 116 * fy - 16 : 903.3 * Y) * 2.55);
     A[i] = Math.max(0, Math.min(255, Math.round(500 * (fx - fy) + 128)));
     B[i] = Math.max(0, Math.min(255, Math.round(200 * (fy - fz) + 128)));
+    keys[slot] = key; vals[slot] = (L[i] << 16) | (A[i] << 8) | B[i];
   }
   return [L, A, B];
 }
@@ -402,7 +451,7 @@ function canny(ch, w, h, pct, out) {
       const p = y * w + x;
       const gx = -ch[p - w - 1] - 2 * ch[p - 1] - ch[p + w - 1] + ch[p - w + 1] + 2 * ch[p + 1] + ch[p + w + 1];
       const gy = -ch[p - w - 1] - 2 * ch[p - w] - ch[p - w + 1] + ch[p + w - 1] + 2 * ch[p + w] + ch[p + w + 1];
-      const m = Math.hypot(gx, gy);
+      const m = Math.sqrt(gx * gx + gy * gy); // integer inputs: exact, and far cheaper than hypot
       mag[p] = m;
       hist[Math.min(2047, m | 0)]++;
       const ax = Math.abs(gx), ay = Math.abs(gy);
@@ -441,30 +490,32 @@ function canny(ch, w, h, pct, out) {
   }
 }
 
-// Zhang–Suen thinning to a 1px skeleton, in place.
+// Zhang–Suen thinning to a 1px skeleton, in place. Each sub-step decides all its deletions
+// before applying any, so scanning only the interior edge pixels gives the same result as
+// scanning the whole frame; the list shrinks as pixels are removed.
 function thin(img, w, h) {
+  let live = [];
+  for (let y = 1; y < h - 1; y++) for (let x = 1, p = y * w + 1; x < w - 1; x++, p++) if (img[p]) live.push(p);
   const del = [];
   let changed = true;
   while (changed) {
     changed = false;
     for (let step = 0; step < 2; step++) {
       del.length = 0;
-      for (let y = 1; y < h - 1; y++) {
-        for (let x = 1; x < w - 1; x++) {
-          const p = y * w + x;
-          if (!img[p]) continue;
-          const p2 = img[p - w], p3 = img[p - w + 1], p4 = img[p + 1], p5 = img[p + w + 1];
-          const p6 = img[p + w], p7 = img[p + w - 1], p8 = img[p - 1], p9 = img[p - w - 1];
-          const B = p2 + p3 + p4 + p5 + p6 + p7 + p8 + p9;
-          if (B < 2 || B > 6) continue;
-          const A = (!p2 && p3) + (!p3 && p4) + (!p4 && p5) + (!p5 && p6) + (!p6 && p7) + (!p7 && p8) + (!p8 && p9) + (!p9 && p2);
-          if (A !== 1) continue;
-          if (step === 0 ? (p2 * p4 * p6 || p4 * p6 * p8) : (p2 * p4 * p8 || p2 * p6 * p8)) continue;
-          del.push(p);
-        }
+      for (let i = 0; i < live.length; i++) {
+        const p = live[i];
+        if (!img[p]) continue;
+        const p2 = img[p - w], p3 = img[p - w + 1], p4 = img[p + 1], p5 = img[p + w + 1];
+        const p6 = img[p + w], p7 = img[p + w - 1], p8 = img[p - 1], p9 = img[p - w - 1];
+        const B = p2 + p3 + p4 + p5 + p6 + p7 + p8 + p9;
+        if (B < 2 || B > 6) continue;
+        const A = (!p2 && p3) + (!p3 && p4) + (!p4 && p5) + (!p5 && p6) + (!p6 && p7) + (!p7 && p8) + (!p8 && p9) + (!p9 && p2);
+        if (A !== 1) continue;
+        if (step === 0 ? (p2 * p4 * p6 || p4 * p6 * p8) : (p2 * p4 * p8 || p2 * p6 * p8)) continue;
+        del.push(p);
       }
       for (const p of del) img[p] = 0;
-      if (del.length) changed = true;
+      if (del.length) { changed = true; live = live.filter((p) => img[p]); }
     }
   }
 }
