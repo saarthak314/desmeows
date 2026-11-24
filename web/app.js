@@ -616,14 +616,17 @@ const reel = Reel.supported() ? new Reel($('reel')) : null;
 let tracedPrefix = 0;
 let settleToken = 0, settleTimer = 0;
 
-function showFrame(i) {
+const reelOn = () => reel && !reel.failed;
+
+// moving: the playhead is running with the clock (playing, not held at the trace's frontier)
+function showFrame(i, moving = false) {
   if (!clip || !clip.frames[i]) return;
-  if (!reel) { drawFrame(i, playing ? LIVE_CAP : Infinity); return; }
+  if (!reelOn()) { body.classList.remove('reeling'); drawFrame(i, playing ? LIVE_CAP : Infinity); return; }
   settleToken++;
   current = i;
   body.classList.add('reeling');
   reel.show(i);
-  reel.prefetch(i, clip.frames.length);
+  reel.prefetch(i, clip.frames.length, moving);
   updateClock(i);
   if (body.classList.contains('comparing') && body.dataset.state !== 'tracing') showSource(media.start + i / clip.fps, i);
 }
@@ -635,7 +638,7 @@ async function settle() {
   if (!clip || current < 0 || !clip.frames[current]) return;
   const token = ++settleToken;
   drawFrame(current);
-  if (!reel || !calc) return;
+  if (!reelOn() || !calc) { body.classList.remove('reeling'); return; }
   await new Promise((r) => calc.asyncScreenshot({ width: 2, height: 2, targetPixelRatio: 1, showLabels: false, mathBounds: bounds(clip.W, clip.H) }, () => requestAnimationFrame(() => requestAnimationFrame(r))));
   if (token === settleToken && !playing) body.classList.remove('reeling');
 }
@@ -643,7 +646,7 @@ const settleSoon = () => { clearTimeout(settleTimer); settleTimer = setTimeout(s
 
 // Playback is clocked: a frame that is late is skipped, never queued, so heavy traces drop
 // frames instead of slowing down.
-let drawCost = 0, playing = false, raf = 0, t0 = 0, f0 = 0, rendered = 0, rateT = 0, liveFps = 0;
+let drawCost = 0, playing = false, raf = 0, t0 = 0, f0 = 0, rendered = 0, rateT = 0, liveFps = 0, reelCount = 0;
 
 function setPlaying(on, redraw = true) {
   const wasPlaying = playing;
@@ -653,7 +656,7 @@ function setPlaying(on, redraw = true) {
   cancelAnimationFrame(raf);
   if (!playing && wasPlaying && redraw && current >= 0) settle();
   if (playing) {
-    t0 = rateT = performance.now(); f0 = Math.max(0, current); rendered = 0;
+    t0 = rateT = performance.now(); f0 = Math.max(0, current); rendered = 0; reelCount = reel ? reel.shownCount : 0;
     raf = requestAnimationFrame(loop);
   }
 }
@@ -662,25 +665,30 @@ function loop(now) {
   const n = clip.frames.length;
   const limit = body.dataset.state === 'tracing' ? tracedPrefix : n;
   let target = f0 + Math.floor((now - t0) / 1000 * clip.fps);
-  if (limit < n && target >= limit) {
+  const held = limit < n && target >= limit;
+  if (held) {
     // caught up with the trace: hold the last traced frame and let the clock wait
     target = Math.max(0, limit - 1);
     t0 = now - (target - f0) * 1000 / clip.fps;
   }
   target %= n;
-  if (reel) {
-    if (target !== current || reel.shown !== target) showFrame(target);
-    raf = requestAnimationFrame(loop);
-    return;
+  const reeling = reelOn();
+  if (reeling) {
+    if (target !== current || reel.shown !== target) showFrame(target, !held);
+  } else {
+    body.classList.remove('reeling');
+    if (target !== current) drawFrame(target, LIVE_CAP);
   }
-  if (target !== current) drawFrame(target, LIVE_CAP);
   if (now - rateT > 1500) {
-    liveFps = rendered * 1000 / (now - rateT);
-    rendered = 0; rateT = now;
-    const capped = clip.frames[current] && (clip.frames[current].fill?.counts.length || 0) > LIVE_CAP;
+    liveFps = (reeling ? reel.shownCount - reelCount : rendered) * 1000 / (now - rateT);
+    rendered = 0; rateT = now; reelCount = reel ? reel.shownCount : 0;
+    const capped = !reeling && clip.frames[current] && (clip.frames[current].fill?.counts.length || 0) > LIVE_CAP;
+    const rate = `about ${Math.round(liveFps)} of ${Math.round(clip.fps)} frames a second`;
     $('live-note').textContent = capped
       ? `playing draws the largest ${LIVE_CAP} shapes of each frame so the graph keeps up. pause to see every shape; the export draws them all.`
-      : liveFps < clip.fps * 0.8 ? `the live graph is drawing about ${Math.round(liveFps)} of ${Math.round(clip.fps)} frames a second. the export draws every frame.` : '';
+      : liveFps >= clip.fps * 0.8 || body.dataset.state === 'tracing' ? ''
+      : reeling ? `playback here is keeping time by showing ${rate}. the export draws every frame.`
+      : `the live graph is drawing ${rate}. the export draws every frame.`;
   }
   raf = requestAnimationFrame(loop);
 }

@@ -151,10 +151,13 @@ that shaped `render.js`:
   with the same renderer as the export, and shows them on a canvas over the graph. When
   playback stops, the frame goes back to the graph, and the canvas is taken away only
   once Desmos has drawn it. Playback is clocked: a late frame is skipped, never queued.
+  When drawing can't keep up (a very detailed trace, a busy machine, a trace running
+  beside it), frames are asked for as far ahead as drawing one takes and the newest one
+  drawn is shown, so the picture moves at the rate drawing manages and a note says so.
   A clip can be played while it traces; playback starts once half a second is traced
-  and holds at the last traced frame if it catches up. Browsers without `OffscreenCanvas`
-  play through the graph itself, which then draws each frame's largest 600 shapes (300
-  on touch devices).
+  and holds at the last traced frame if it catches up. Browsers without `OffscreenCanvas`,
+  or where the drawing workers fail or stop answering for 2 s, play through the graph
+  itself, which then draws each frame's largest 600 shapes (300 on touch devices).
 
 ## Export
 
