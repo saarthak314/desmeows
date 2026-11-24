@@ -91,9 +91,12 @@ body.comparing .frame-label--left { color: var(--color-warm); }
   aspect-ratio: var(--aspect, 1.7778);
   max-height: 100%;
 }
+/* Layers, bottom to top: the graph, the reel, the source (held to compare), the credit. The
+   graph is isolated so Desmos's own positioned layers stay under the reel. */
+.calc { isolation: isolate; }
 .source { opacity: 0; z-index: var(--z-base); pointer-events: none; }
 /* playback frames, drawn ahead by workers (reel.js), over the graph while things move */
-.reel { visibility: hidden; pointer-events: none; }
+.reel { z-index: var(--z-base); visibility: hidden; pointer-events: none; }
 body.reeling .reel { visibility: visible; }
 
 /* where the export's credit will sit, at the same size relative to the picture */
