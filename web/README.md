@@ -81,7 +81,8 @@ worker pool and sent to the stabilisers as a 5-bit RGB lookup table. One palette
 scene keeps region boundaries steady from frame to frame instead of flickering. These
 thumbnails are decoded in software: the tracing pass waits on the scenes this pass
 finds, and if both drew on the GPU's limited decoder surfaces they could starve each
-other.
+other. A codec the browser decodes only in hardware (HEVC, in Chrome) has its
+thumbnails all read first, and the tracing pass starts after.
 
 **Tracing.** Frames are decoded at trace size, scaled on the GPU, snapshotted as
 `ImageBitmap`s and transferred to a pool of workers (every core but one, at most 16), a
@@ -156,7 +157,7 @@ that shaped `render.js`:
   drawn is shown, so the picture moves at the rate drawing manages and a note says so.
   A clip can be played while it traces; playback starts once half a second is traced
   and holds at the last traced frame if it catches up. Browsers without `OffscreenCanvas`,
-  or where the drawing workers fail or stop answering for 2 s, play through the graph
+  or where the drawing workers fail or stop answering for 8 s, play through the graph
   itself, which then draws each frame's largest 600 shapes (300 on touch devices).
 
 ## Export

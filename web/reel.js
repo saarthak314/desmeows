@@ -14,6 +14,9 @@ const AHEAD = 12;    // frames drawn ahead of the playhead (0.4 s at 30 fps)
 // help) and one on its own CPU thread, which adds throughput for very detailed frames.
 const WORKERS = [false, false, true]; // cpu?
 const PER_WORKER = 3;
+// A frame asked for this long ago with no worker answering since means the workers are stuck.
+// Generous: a trace running beside playback can starve them of CPU for a few seconds.
+const STUCK = 8000;
 
 export class Reel {
   constructor(canvas) {
@@ -28,12 +31,11 @@ export class Reel {
     this.clip = null;
     this.want = -1;           // the frame the screen should show
     this.shown = -1;          // the frame it does show
-    this.failed = '';         // why the reel gave up, if it did (app.js then plays through the graph)
-    this.missSince = 0;       // when the wanted frame first wasn't there
+    this.failed = '';         // why the reel gave up on this clip, if it did (app.js then plays through the graph)
     this.lastReply = 0;       // when a worker last answered
   }
 
-  // Give up for good, say why in the console, and let app.js fall back to the graph.
+  // Give up on this clip, say why in the console, and let app.js fall back to the graph.
   fail(why) {
     if (this.failed) return;
     this.failed = why;
@@ -46,14 +48,17 @@ export class Reel {
     return typeof OffscreenCanvas !== 'undefined' && typeof createImageBitmap === 'function' && typeof Worker !== 'undefined';
   }
 
-  // Start (or restart) for a clip at the canvas's current size in device pixels.
+  // Start (or restart) for a clip at the canvas's current size in device pixels; false if
+  // it was already set up for that.
   setup(clip) {
     const dpr = Math.min(2, window.devicePixelRatio || 1);
     const w = Math.max(2, Math.round(this.canvas.clientWidth * dpr));
     const h = Math.max(2, Math.round(this.canvas.clientHeight * dpr));
     const key = `${clip.W}x${clip.H}|${clip.style}|${w}x${h}`;
-    if (key === this.key && this.clip === clip) return;
+    if (key === this.key && this.clip === clip) return false;
+    if (this.failed && this.clip === clip) return false; // a new clip gets a fresh start
     this.reset();
+    this.failed = '';
     this.key = key;
     this.clip = clip;
     this.lastReply = performance.now();
@@ -68,6 +73,7 @@ export class Reel {
       wk.postMessage({ type: 'init', W: clip.W, H: clip.H, style: clip.style, outW: w, outH: h, fps: clip.fps, cpu, credit: null, bitmaps: true });
       this.workers.push(wk);
     }
+    return true;
   }
 
   reset() {
@@ -92,12 +98,12 @@ export class Reel {
       this.shown = k;
       this.shownCount++;
     }
-    if (k === i) { this.missSince = 0; return true; }
-    // the wanted frame hasn't come for 2 s, and no worker has answered: the workers are stuck,
-    // so don't leave the picture frozen
+    if (k === i) return true;
+    // don't leave the picture frozen behind stuck workers
     const now = performance.now();
-    if (!this.missSince) this.missSince = now;
-    else if (now - this.missSince > 2000 && now - this.lastReply > 2000) this.fail('the drawing workers stopped answering');
+    let oldest = now;
+    for (const t of this.pending.values()) if (t < oldest) oldest = t;
+    if (now - oldest > STUCK && now - this.lastReply > STUCK) this.fail('the drawing workers stopped answering');
     return false;
   }
 

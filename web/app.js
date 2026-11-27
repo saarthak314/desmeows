@@ -129,9 +129,13 @@ function traceWidth() {
 const even = (n) => Math.max(2, Math.round(n / 2) * 2);
 const settingsKey = () => `${settings.style}|${settings.fidelity}|${settings.fps}|${settings.style === 'paint' && settings.ink}`;
 
+// Once a trace matches the settings, exporting is the next step and tracing steps back from
+// primary; a changed setting makes it "trace again", primary once more.
 function markStale() {
-  if (!clip || body.dataset.state === 'tracing') return;
-  $('trace').textContent = clip.key === settingsKey() ? 'trace video' : 'trace again';
+  if (body.dataset.state === 'tracing') return;
+  const fresh = !!clip && clip.key === settingsKey();
+  $('trace').textContent = clip && !fresh ? 'trace again' : 'trace video';
+  $('trace').classList.toggle('btn--primary', !fresh);
 }
 
 function showError(msg) {
@@ -164,6 +168,18 @@ async function load(file) {
   if (!('VideoDecoder' in window)) {
     return fail('this browser cannot decode video in the page. use a current chrome, edge, firefox or safari.');
   }
+  // a new file replaces whatever was traced from the last one
+  if (clip) {
+    setPlaying(false, false);
+    clip = null;
+    if (reel) reel.reset();
+    body.classList.remove('reeling');
+    $('play').disabled = true; $('scrub').disabled = true; $('compare').disabled = true;
+    $('scrub').value = 0; $('time').textContent = '0:00.0 / 0:00.0';
+    $('result').hidden = true; $('export').hidden = true; $('download').hidden = true;
+    $('live-note').textContent = '';
+  }
+  showError('');
   setState('loaded');
   // Trace waits until the file is open: clicking it earlier would have done nothing
   $('trace').disabled = true;
@@ -182,6 +198,9 @@ async function load(file) {
     const video = await input.getPrimaryVideoTrack();
     if (!video) return fail('this file has no video track.');
     if (!(await video.canDecode())) return fail(`this browser cannot decode this video's codec (${video.codec || 'unknown'}). an h.264 mp4 works everywhere.`);
+    // whether thumbnails can be decoded in software, away from the GPU's decoders (see trace())
+    const config = await video.getDecoderConfig();
+    const soft = config ? await VideoDecoder.isConfigSupported({ ...config, hardwareAcceleration: 'prefer-software' }).catch(() => null) : null;
     const audio = await input.getPrimaryAudioTrack();
     const start = await video.getFirstTimestamp();
     const end = await video.computeDuration();
@@ -190,8 +209,11 @@ async function load(file) {
       file, input, video, audio, start, duration: end - start,
       srcW: video.displayWidth, srcH: video.displayHeight,
       srcFps: Math.round(stats.averagePacketRate * 100) / 100,
+      softThumbs: !!soft?.supported,
     };
   } catch (err) {
+    // mediabunny's words for a file that isn't a video it knows
+    if (/unsupported or unrecognizable format/i.test(err?.message || '')) return fail('this file is not a video this page can read. an mp4, mov or webm works.');
     return fail(`could not read this file: ${err.message || err}`);
   }
   document.documentElement.style.setProperty('--aspect', `${media.srcW / media.srcH}`);
@@ -199,20 +221,30 @@ async function load(file) {
   media.sourceSink = new CanvasSink(media.video, { width: even(Math.min(media.srcW, 1280)), height: even(Math.min(media.srcW, 1280) * media.srcH / media.srcW), fit: 'fill' });
   await showSource(media.start);
   body.classList.add('comparing');
-  $('frame-note').textContent = `${media.srcW} × ${media.srcH}, ${media.duration.toFixed(1)} s, ${Math.round(media.srcFps)} fps`;
+  $('frame-note').textContent = sourceNote();
   buildSizes();
   syncSettingsUI();
   layoutFrame();
   $('trace').disabled = false;
 }
 
+const sourceNote = () => `${media.srcW} × ${media.srcH}, ${media.duration.toFixed(1)} s, ${Math.round(media.srcFps)} fps`;
+
 function fail(msg) {
   setState(media ? 'loaded' : 'empty');
+  // the bar names the file that is open, not the one that failed
+  $('file-name').textContent = media ? media.file.name : '';
+  $('new-video').hidden = !media;
   if (!media) {
     $('screen').hidden = true; $('sheet').hidden = true;
     alertEmpty(msg);
   } else {
+    // still the open file's source frame and details
     showError(msg);
+    $('frame-label').textContent = 'source';
+    $('frame-note').textContent = sourceNote();
+    body.classList.add('comparing');
+    $('trace').disabled = false;
   }
 }
 
@@ -222,7 +254,8 @@ function alertEmpty(msg) {
     p = document.createElement('p');
     p.className = 'error drop-error';
     p.setAttribute('role', 'alert');
-    $('drop').append(p);
+    // next to the action that failed
+    document.querySelector('.drop-note').after(p);
   }
   p.textContent = msg;
 }
@@ -357,8 +390,10 @@ async function trace() {
     const TW = 160, TH = even(160 * H / W);
     // The thumbnails are decoded in software. The tracing pass waits on the scenes this pass
     // finds, and its hardware decoder holds decoded frames while it waits; if both passes drew
-    // on the GPU's limited decoder surfaces, this one could starve and neither would move.
-    const thumbSink = new CanvasSink(media.video, { width: TW, height: TH, fit: 'fill', poolSize: 1, decoderOptions: { hardwareAcceleration: 'prefer-software' } });
+    // on the GPU's limited decoder surfaces, this one could starve and neither would move. A
+    // codec the browser decodes only in hardware (HEVC, in Chrome) has its thumbnails all read
+    // first, before the tracing pass starts (below).
+    const thumbSink = new CanvasSink(media.video, { width: TW, height: TH, fit: 'fill', poolSize: 1, decoderOptions: media.softThumbs ? { hardwareAcceleration: 'prefer-software' } : {} });
     const readThumb = frameReader(TW, TH);
     // thumbnails are read back in two small workers (a few in flight, taken in order), so the
     // main thread never waits on the GPU; without OffscreenCanvas they are read here instead
@@ -383,6 +418,7 @@ async function trace() {
       if (s !== cur) { close(cur); cur = s; }
       read++;
       tick();
+      if (!media.softThumbs) progress('reading frames', read, count);
       if (wake) { const w = wake; wake = null; w(); }
     };
     const it = thumbSink.canvasesAtTimestamps(times)[Symbol.asyncIterator]();
@@ -419,6 +455,7 @@ async function trace() {
     $('frame-label').textContent = 'desmos';
     body.classList.remove('comparing');
     progress('reading frames', 0, count);
+    if (!media.softThumbs) await Promise.race([reader, failure]);
     const sink = new CanvasSink(media.video, { width: W, height: H, fit: 'fill', poolSize: 1 });
     const readFrame = frameReader(W, H);
     let i = 0, done = 0;
@@ -530,9 +567,11 @@ function finishTrace(partial = false) {
   $('r-scenes').textContent = fmtInt(clip.scenes);
   $('r-shapes').textContent = fmtInt(Math.round(shapes / f.length));
   $('r-verts').textContent = fmtInt(Math.round(verts / f.length));
-  $('live-note').textContent = partial ? `stopped after ${f.length} frames.` : '';
+  // the frame rate note measures playback from here, not the trace's last busy moments
+  rateT = performance.now(); rendered = 0; reelCount = reel ? reel.shownCount : 0;
+  clip.stopNote = partial ? `stopped after ${f.length} frames.` : '';
+  $('live-note').textContent = clip.stopNote;
   $('result').hidden = false; $('export').hidden = false; $('download').hidden = true;
-  $('trace').textContent = 'trace video';
   $('frame-label').textContent = 'desmos';
   $('frame-note').textContent = `${clip.style}, ${settings.fidelity}, ${clip.W} px`;
   clip.note = $('frame-note').textContent;
@@ -561,14 +600,27 @@ const CALC_OPTIONS = {
   links: false, images: false, folders: false, notes: false, sliders: false,
 };
 
+// The graph is a picture here: Desmos's own keyboard stops on it (for exploring curves by
+// sound) would only be dead stops in the tab order. Desmos builds its parts after the
+// calculator is made and sets their tabindex again as it redraws, so each part that has one is
+// made inert as it appears; the trial notice's button and link stay usable.
+function untab(el) {
+  const go = () => { for (const t of el.querySelectorAll('[tabindex="0"]:not([inert])')) if (!t.matches('a, button')) t.inert = true; };
+  go();
+  new MutationObserver(go).observe(el, { childList: true, subtree: true, attributes: true, attributeFilter: ['tabindex', 'inert'] });
+}
+
 async function ensureCalc(W, H, style) {
   if (!calc) {
     const Desmos = await desmos();
     calc = Desmos.GraphingCalculator($('calc'), { ...CALC_OPTIONS, backgroundColor: colorToken('--color-paper') });
+    untab($('calc'));
     painter = new Painter(calc);
     new ResizeObserver(() => {
       applyWidths();
-      if (reel && clip) { reel.setup(clip); if (body.classList.contains('reeling') && current >= 0) showFrame(current); }
+      // a reel restarted at the new size shows the frame again, and hands it back if paused
+      if (!reel || !clip || !reel.setup(clip)) return;
+      if (body.classList.contains('reeling') && current >= 0) { showFrame(current); if (!playing) settleSoon(); }
     }).observe($('calc'));
   }
   const key = `${W}x${H}|${style}`;
@@ -664,7 +716,8 @@ function setPlaying(on, redraw = true) {
 function loop(now) {
   const n = clip.frames.length;
   const limit = body.dataset.state === 'tracing' ? tracedPrefix : n;
-  let target = f0 + Math.floor((now - t0) / 1000 * clip.fps);
+  // a frame's timestamp can be a little before t0 was taken
+  let target = f0 + Math.floor(Math.max(0, now - t0) / 1000 * clip.fps);
   const held = limit < n && target >= limit;
   if (held) {
     // caught up with the trace: hold the last traced frame and let the clock wait
@@ -684,11 +737,13 @@ function loop(now) {
     rendered = 0; rateT = now; reelCount = reel ? reel.shownCount : 0;
     const capped = !reeling && clip.frames[current] && (clip.frames[current].fill?.counts.length || 0) > LIVE_CAP;
     const rate = `about ${Math.round(liveFps)} of ${Math.round(clip.fps)} frames a second`;
-    $('live-note').textContent = capped
+    const note = capped
       ? `playing draws the largest ${LIVE_CAP} shapes of each frame so the graph keeps up. pause to see every shape; the export draws them all.`
       : liveFps >= clip.fps * 0.8 || body.dataset.state === 'tracing' ? ''
       : reeling ? `playback here is keeping time by showing ${rate}. the export draws every frame.`
       : `the live graph is drawing ${rate}. the export draws every frame.`;
+    // after a stopped trace, that stays said
+    $('live-note').textContent = [clip.stopNote, note].filter(Boolean).join(' ');
   }
   raf = requestAnimationFrame(loop);
 }
@@ -725,11 +780,17 @@ addEventListener('keydown', (e) => {
 });
 addEventListener('keyup', (e) => { if (e.key === 'c' || e.key === 'C') comparing(false); });
 
+// The tallest the picture can be: the screen's height, less the transport under the frame and
+// the frame's own padding and border. Measured on the screen, whose size never depends on the
+// picture, so fitting the picture can't feed back into the measure.
 function layoutFrame() {
-  const fr = $('frame');
-  document.documentElement.style.setProperty('--frame-h', `${fr.clientHeight}px`);
+  const sc = $('screen'), fr = $('frame'), s = getComputedStyle(sc), f = getComputedStyle(fr);
+  const px = (v) => parseFloat(v) || 0;
+  const h = sc.clientHeight - px(s.paddingTop) - px(s.paddingBottom) - px(s.rowGap) - $('transport').offsetHeight
+    - px(f.paddingTop) - px(f.paddingBottom) - px(f.borderTopWidth) - px(f.borderBottomWidth);
+  document.documentElement.style.setProperty('--frame-h', `${Math.max(0, h)}px`);
 }
-new ResizeObserver(layoutFrame).observe($('frame'));
+{ const ro = new ResizeObserver(layoutFrame); ro.observe($('screen')); ro.observe($('transport')); }
 
 // ---------------------------------------------------------------- export
 
@@ -864,7 +925,7 @@ async function exportMp4() {
   if (viaDesmos) {
     const el = $('export-calc');
     el.style.width = `${W}px`; el.style.height = `${H}px`;
-    if (!exportCalc) exportCalc = (await desmos()).GraphingCalculator(el, CALC_OPTIONS);
+    if (!exportCalc) { exportCalc = (await desmos()).GraphingCalculator(el, CALC_OPTIONS); untab(el); }
     exportCalc.setState(slotState(exportCalc.getState(), W, H));
     exportPainter = new Painter(exportCalc);
     exportCalc.setMathBounds(bounds(W, H));
@@ -1076,7 +1137,7 @@ let cur = -1, playing = true, t0 = performance.now(), f0 = 0;
 const seek = document.getElementById('seek'), t = document.getElementById('t'), play = document.getElementById('play');
 seek.max = frames.length - 1;
 function show(i, cap) { cur = i; painter.draw(frames[i], D.style, cap); seek.value = i; t.textContent = (i / D.fps).toFixed(1) + ' s'; }
-function loop(now) { if (playing) { const i = (f0 + Math.floor((now - t0) / 1000 * D.fps)) % frames.length; if (i !== cur) show(i, 600); } requestAnimationFrame(loop); }
+function loop(now) { if (playing) { const i = (f0 + Math.floor(Math.max(0, now - t0) / 1000 * D.fps)) % frames.length; if (i !== cur) show(i, 600); } requestAnimationFrame(loop); }
 play.onclick = () => { playing = !playing; play.textContent = playing ? 'pause' : 'play'; t0 = performance.now(); f0 = Math.max(0, cur); if (!playing) show(cur); };
 seek.oninput = () => { playing = false; play.textContent = 'play'; show(+seek.value); };
 show(0); requestAnimationFrame(loop);
@@ -1102,4 +1163,4 @@ function fmtBytes(b) {
 syncSettingsUI();
 
 // ?debug exposes the live state for benchmarking and diagnosis; nothing reads it otherwise.
-if (params.has('debug')) window.__desmeows = { get clip() { return clip; }, get calc() { return calc; }, get media() { return media; }, settings };
+if (params.has('debug')) window.__desmeows = { get clip() { return clip; }, get calc() { return calc; }, get media() { return media; }, get reel() { return reel; }, settings };
