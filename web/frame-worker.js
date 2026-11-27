@@ -1,7 +1,8 @@
-// The tracing worker as the app runs it: tracer.js, plus reading frames out of ImageBitmaps.
-// Frames arrive as GPU bitmaps (scaled by the decoder's canvas, transferred zero-copy) and are
-// read back here, so the synchronous GPU -> CPU round trip (about a millisecond per frame,
-// whatever the size) is paid in parallel across workers instead of on the main thread.
+// The tracing worker as the app runs it: tracer.js, plus reading frames out of what the page
+// hands over. In Chromium that is a GPU bitmap, already scaled by the decoder's canvas, and the
+// GPU -> CPU round trip is paid here, in parallel across workers, not on the main thread. In
+// Firefox and Safari it is the decoded VideoFrame itself, scaled and turned upright here on
+// the CPU, as their GPU readback is slow (app.js, viaFrame). Both transfer zero-copy.
 //
 // A frame is held still by the stabiliser (stabilise.js) before it is traced. That has to see
 // every frame in order, so a few of these workers are stabilisers, each for one horizontal
@@ -13,14 +14,33 @@ import { Stabiliser } from './stabilise.js';
 const trace = self.onmessage; // installed by tracer.js on import
 let canvas = null, ctx = null;
 
-function draw(bitmap, w, h) {
+// d.bitmap (already w x h) or d.frame (any size, with its rotation and flip) into the canvas
+function draw(d, w, h) {
   if (!canvas || canvas.width !== w || canvas.height !== h) {
     canvas = new OffscreenCanvas(w, h);
-    // CPU-backed from the start: a 1:1 copy then a read, the same every run
+    // CPU-backed from the start: a copy (or a CPU scale) then a read, the same every run
     ctx = canvas.getContext('2d', { willReadFrequently: true });
   }
-  ctx.drawImage(bitmap, 0, 0);
-  bitmap.close();
+  if (d.bitmap) {
+    ctx.drawImage(d.bitmap, 0, 0);
+    d.bitmap.close();
+    d.bitmap = null;
+    return;
+  }
+  const r = d.rotation || 0;
+  if (!r && !d.flip) ctx.drawImage(d.frame, 0, 0, w, h);
+  else {
+    // rotated about the centre, then flipped, as the video says it should be shown
+    ctx.save();
+    ctx.translate(w / 2, h / 2);
+    if (d.flip) ctx.scale(-1, 1);
+    ctx.rotate(r * Math.PI / 180);
+    const [fw, fh] = r % 180 ? [h, w] : [w, h];
+    ctx.drawImage(d.frame, -fw / 2, -fh / 2, fw, fh);
+    ctx.restore();
+  }
+  d.frame.close();
+  d.frame = null;
 }
 
 // ---------------------------------------------------------------- tracing
@@ -30,10 +50,9 @@ const waiting = new Map();   // frame id -> { d, parts, left }
 
 function send(d) {
   const parts = [];
-  if (d.bitmap) {
-    draw(d.bitmap, d.w, d.h);
+  if (d.bitmap || d.frame) {
+    draw(d, d.w, d.h);
     for (let k = 0, y = 0; k < d.strips.length; y += d.strips[k++]) parts.push(ctx.getImageData(0, y, d.w, d.strips[k]).data);
-    d.bitmap = null;
   } else {
     for (let k = 0, o = 0; k < d.strips.length; o += 4 * d.w * d.strips[k++]) parts.push(d.rgba.slice(o, o + 4 * d.w * d.strips[k]));
     d.rgba = null;
@@ -87,10 +106,9 @@ self.onmessage = (e) => {
   }
   if (d.type === 'stable-palette') { stable.palette(d.index, d.lut, d.centres); drain(); return; }
   if (d.strips) { send(d); return; }
-  if (d.bitmap) {
-    draw(d.bitmap, d.w, d.h);
+  if (d.bitmap || d.frame) {
+    draw(d, d.w, d.h);
     d.rgba = ctx.getImageData(0, 0, d.w, d.h).data;
-    d.bitmap = null;
     if (d.type === 'pixels') { self.postMessage({ rgba: d.rgba }, [d.rgba.buffer]); return; }
   }
   trace.call(self, { data: d });

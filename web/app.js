@@ -10,12 +10,12 @@ import { Reel } from './reel.js';
 // fetching it at low priority, it is run once the page and mediabunny are in, or as soon as a
 // file is chosen if that is sooner, awaited before the first calculator is made, and fetched
 // again by the next trace if it failed.
-let Input, ALL_FORMATS, BlobSource, CanvasSink, Output, Mp4OutputFormat, BufferTarget,
+let Input, ALL_FORMATS, BlobSource, CanvasSink, VideoSampleSink, Output, Mp4OutputFormat, BufferTarget,
   CanvasSource, EncodedPacketSink, EncodedAudioPacketSource, canEncodeVideo, VideoSampleSource, VideoSample;
 // vendored byte for byte from the npm package (vendor/mediabunny-1.65.2/LICENSE), so it comes
 // over the page's own connection; nothing may import it statically, or app.js waits for it
 const mediabunny = import('./vendor/mediabunny-1.65.2/mediabunny.min.mjs').then((m) => {
-  ({ Input, ALL_FORMATS, BlobSource, CanvasSink, Output, Mp4OutputFormat, BufferTarget,
+  ({ Input, ALL_FORMATS, BlobSource, CanvasSink, VideoSampleSink, Output, Mp4OutputFormat, BufferTarget,
     CanvasSource, EncodedPacketSink, EncodedAudioPacketSource, canEncodeVideo, VideoSampleSource, VideoSample } = m);
 });
 mediabunny.catch(() => {}); // reported by load()
@@ -343,8 +343,14 @@ async function trace() {
   const next = { W, H, fps, style, frames: new Array(count), scenes: 1, key: settingsKey(), name: media.file.name };
   // every core but one, which is left for decoding and the page
   const pool = new Pool(Math.max(2, Math.min(16, (navigator.hardwareConcurrency || 4) - 1)), './frame-worker.js');
-  // frames go to the workers as GPU bitmaps where the browser can (see frame-worker.js)
+  // Frames reach the workers one of two ways (frame-worker.js reads them back). Chromium scales
+  // each on the GPU, in the decoder's canvas, and hands over a small bitmap. Firefox and Safari
+  // read a GPU canvas back slowly (a round trip to their GPU process for every frame, one at a
+  // time), so they hand over the decoded VideoFrame itself and the worker scales it on the CPU:
+  // 2.5 to 13 times the frames a second there, against slower in Chromium from 1080p up
+  // (measured on 720p to 4K clips). userAgentData is a Chromium-only API.
   const viaBitmap = typeof OffscreenCanvas !== 'undefined' && typeof createImageBitmap === 'function';
+  const viaFrame = viaBitmap && typeof VideoFrame === 'function' && !('userAgentData' in navigator);
   let stopReaders = () => {}, closeThumbs = () => {}, closeFrames = () => {};
   let shown = -1, lastPreview = 0;
 
@@ -393,7 +399,8 @@ async function trace() {
     // on the GPU's limited decoder surfaces, this one could starve and neither would move. A
     // codec the browser decodes only in hardware (HEVC, in Chrome) has its thumbnails all read
     // first, before the tracing pass starts (below).
-    const thumbSink = new CanvasSink(media.video, { width: TW, height: TH, fit: 'fill', poolSize: 1, decoderOptions: media.softThumbs ? { hardwareAcceleration: 'prefer-software' } : {} });
+    const decoder = media.softThumbs ? { hardwareAcceleration: 'prefer-software' } : {};
+    const thumbSink = viaFrame ? new VideoSampleSink(media.video, decoder) : new CanvasSink(media.video, { width: TW, height: TH, fit: 'fill', poolSize: 1, decoderOptions: decoder });
     const readThumb = frameReader(TW, TH);
     // thumbnails are read back in two small workers (a few in flight, taken in order), so the
     // main thread never waits on the GPU; without OffscreenCanvas they are read here instead
@@ -421,17 +428,21 @@ async function trace() {
       if (!media.softThumbs) progress('reading frames', read, count);
       if (wake) { const w = wake; wake = null; w(); }
     };
-    const it = thumbSink.canvasesAtTimestamps(times)[Symbol.asyncIterator]();
-    closeThumbs = () => it.return && it.return().catch(() => {});
+    const it = (viaFrame ? thumbSink.samplesAtTimestamps(times) : thumbSink.canvasesAtTimestamps(times))[Symbol.asyncIterator]();
+    const thumbFrames = framesFor();
+    closeThumbs = () => { thumbFrames.close(); if (it.return) it.return().catch(() => {}); };
     for (;;) {
       const { value: wrapped, done: end } = await Promise.race([it.next(), failure]);
       if (end) break;
       if (stopping || abort) throw new Stop();
       if (!readers) { take(readThumb(wrapped)); continue; }
-      const bitmap = await createImageBitmap(wrapped.canvas);
-      ordered.push(readers.run({ type: 'pixels', bitmap, w: TW, h: TH }, [bitmap]));
+      const msg = { type: 'pixels', w: TW, h: TH };
+      if (viaFrame) Object.assign(msg, thumbFrames.take(wrapped));
+      else msg.bitmap = await createImageBitmap(wrapped.canvas);
+      ordered.push(readers.run(msg, [msg.frame || msg.bitmap]));
       if (ordered.length >= 6) take((await ordered.shift()).rgba);
     }
+    thumbFrames.close();
     while (ordered.length) take((await ordered.shift()).rgba);
     if (readers) readers.terminate();
     close(cur);
@@ -441,12 +452,17 @@ async function trace() {
   })();
   reader.catch((e) => fail(e));
 
+  let calcReady = null;
   try {
     clip = next;
     tracedPrefix = 0;
     current = -1;
     body.classList.remove('reeling');
-    await Promise.race([ensureCalc(W, H, style), failure]);
+    // The graph is only needed to show a paused frame: tracing, and playing through the reel,
+    // start without it (on a first visit Desmos may still be downloading). A trace finishes
+    // once it is up, and fails if it can't load.
+    calcReady = ensureCalc(W, H, style);
+    calcReady.catch((e) => fail(e));
     if (reel) reel.setup(clip);
     // the clip can be played while it traces: playback holds at the last frame traced so far
     $('scrub').max = count - 1; $('scrub').value = 0; $('scrub').disabled = false;
@@ -456,12 +472,13 @@ async function trace() {
     body.classList.remove('comparing');
     progress('reading frames', 0, count);
     if (!media.softThumbs) await Promise.race([reader, failure]);
-    const sink = new CanvasSink(media.video, { width: W, height: H, fit: 'fill', poolSize: 1 });
+    const sink = viaFrame ? new VideoSampleSink(media.video) : new CanvasSink(media.video, { width: W, height: H, fit: 'fill', poolSize: 1 });
     const readFrame = frameReader(W, H);
     let i = 0, done = 0;
     const pending = new Set();
-    const frames = sink.canvasesAtTimestamps(times)[Symbol.asyncIterator]();
-    closeFrames = () => frames.return && frames.return().catch(() => {});
+    const frames = (viaFrame ? sink.samplesAtTimestamps(times) : sink.canvasesAtTimestamps(times))[Symbol.asyncIterator]();
+    const traceFrames = framesFor();
+    closeFrames = () => { traceFrames.close(); if (frames.return) frames.return().catch(() => {}); };
     for (;;) {
       // raced against failure, so a stalled decoder can't hold the loop forever
       const { value: wrapped, done: end } = await Promise.race([frames.next(), failure]);
@@ -472,7 +489,10 @@ async function trace() {
       await Promise.race([sceneReady(scene[id]), failure]);
       let job;
       const msg = { id, w: W, h: H, strips: stripRows, opts: { ...opts, scene: scene[id] } };
-      if (viaBitmap) {
+      if (viaFrame) {
+        Object.assign(msg, traceFrames.take(wrapped));
+        job = pool.run(msg, [msg.frame]);
+      } else if (viaBitmap) {
         msg.bitmap = await createImageBitmap(wrapped.canvas);
         job = pool.run(msg, [msg.bitmap]);
       } else {
@@ -497,11 +517,16 @@ async function trace() {
     await reader;
     // raced too: a stabiliser that fails leaves its frames' jobs waiting
     await Promise.race([Promise.all(pending), failure]);
+    await Promise.race([calcReady, failure]);
     finishTrace();
   } catch (err) {
     if (err instanceof Stop) {
       const have = next.frames.findIndex((f) => !f);
-      if (have > 0) { next.frames.length = have; clip = next; finishTrace(true); }
+      if (have > 0) {
+        next.frames.length = have; clip = next; finishTrace(true);
+        // the graph takes the paused frame once it is up
+        if (calcReady) calcReady.then(() => { if (clip === next && !playing) settle(); }, () => {});
+      }
       else { clip = null; resetAfterTrace(); }
     } else {
       console.error(err);
@@ -534,6 +559,20 @@ function frameReader(w, h) {
   return (wrapped) => {
     ctx.drawImage(wrapped.canvas, 0, 0);
     return ctx.getImageData(0, 0, w, h).data;
+  };
+}
+
+// Decoded samples as VideoFrames for the workers, with what they need to draw each upright.
+// Every frame handed over is the worker's to close. A sample is closed once the next one comes,
+// since the sink may yield one sample for several timestamps.
+function framesFor() {
+  let last = null;
+  return {
+    take(sample) {
+      if (sample !== last) { if (last) last.close(); last = sample; }
+      return { frame: sample.toVideoFrame(), rotation: sample.rotation, flip: sample.flip };
+    },
+    close() { if (last) last.close(); last = null; },
   };
 }
 
@@ -610,19 +649,23 @@ function untab(el) {
   new MutationObserver(go).observe(el, { childList: true, subtree: true, attributes: true, attributeFilter: ['tabindex', 'inert'] });
 }
 
+let calcMade = null;
+async function makeCalc() {
+  const Desmos = await desmos();
+  calc = Desmos.GraphingCalculator($('calc'), { ...CALC_OPTIONS, backgroundColor: colorToken('--color-paper') });
+  untab($('calc'));
+  painter = new Painter(calc);
+  new ResizeObserver(() => {
+    applyWidths();
+    // a reel restarted at the new size shows the frame again, and hands it back if paused
+    if (!reel || !clip || !reel.setup(clip)) return;
+    if (body.classList.contains('reeling') && current >= 0) { showFrame(current); if (!playing) settleSoon(); }
+  }).observe($('calc'));
+}
+
 async function ensureCalc(W, H, style) {
-  if (!calc) {
-    const Desmos = await desmos();
-    calc = Desmos.GraphingCalculator($('calc'), { ...CALC_OPTIONS, backgroundColor: colorToken('--color-paper') });
-    untab($('calc'));
-    painter = new Painter(calc);
-    new ResizeObserver(() => {
-      applyWidths();
-      // a reel restarted at the new size shows the frame again, and hands it back if paused
-      if (!reel || !clip || !reel.setup(clip)) return;
-      if (body.classList.contains('reeling') && current >= 0) { showFrame(current); if (!playing) settleSoon(); }
-    }).observe($('calc'));
-  }
+  // made once, however many traces ask while Desmos is still loading
+  if (!calc) await (calcMade ||= makeCalc().catch((e) => { calcMade = null; throw e; }));
   const key = `${W}x${H}|${style}`;
   if (key !== calcKey) {
     calc.setState(slotState(calc.getState(), W, H));
@@ -647,7 +690,7 @@ const LIVE_CAP = matchMedia('(pointer: coarse)').matches ? 300 : 600;
 // The graph draws frame i (capped while playing, in browsers without the reel).
 function drawFrame(i, cap = Infinity) {
   const fr = clip?.frames[i];
-  if (!fr) return;
+  if (!fr || !painter) return; // no graph yet (trace() starts before Desmos is up)
   current = i;
   const t = performance.now();
   painter.draw(fr, clip.style, cap);
@@ -688,6 +731,7 @@ function showFrame(i, moving = false) {
 async function settle() {
   clearTimeout(settleTimer);
   if (!clip || current < 0 || !clip.frames[current]) return;
+  if (!calc && reelOn()) return; // the reel keeps the frame until the graph is up
   const token = ++settleToken;
   drawFrame(current);
   if (!reelOn() || !calc) { body.classList.remove('reeling'); return; }
